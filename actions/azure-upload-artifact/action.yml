@@ -1,0 +1,150 @@
+name: 'Azure - Upload Artifact'
+description: 'Upload files or directories to Azure Blob Storage using OIDC authentication'
+
+inputs:
+  storage-account-name:
+    description: 'Azure Storage Account name'
+    required: true
+  container-name:
+    description: 'Blob container name (must exist before upload)'
+    required: true
+  source-path:
+    description: 'Local file or directory path to upload'
+    required: true
+  destination-path:
+    description: 'Destination blob path/prefix (empty for root, use trailing / for directory prefix)'
+    required: false
+    default: ''
+  overwrite:
+    description: 'Overwrite existing blobs (true/false)'
+    required: false
+    default: 'true'
+  content-type:
+    description: 'Content type for uploaded blobs (e.g., application/json, text/plain)'
+    required: false
+    default: ''
+
+outputs:
+  upload-status:
+    description: 'Upload status (success/failed)'
+    value: ${{ steps.upload.outputs.status }}
+  uploaded-count:
+    description: 'Number of files uploaded'
+    value: ${{ steps.upload.outputs.count }}
+
+runs:
+  using: composite
+  steps:
+    - name: Upload to Azure Blob Storage
+      id: upload
+      shell: bash
+      run: |
+        echo "::group::Uploading to Azure Blob Storage"
+
+        # Validate source path exists
+        if [ ! -e "${{ inputs.source-path }}" ]; then
+          echo "❌ Failed: Source path '${{ inputs.source-path }}' does not exist"
+          echo "status=failed" >> $GITHUB_OUTPUT
+          echo "count=0" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+
+        UPLOAD_COUNT=0
+        STATUS="failed"
+
+        # Upload single file
+        if [ -f "${{ inputs.source-path }}" ]; then
+          echo "📁 Uploading file: ${{ inputs.source-path }}"
+          echo "   → Storage: ${{ inputs.storage-account-name }}/${{ inputs.container-name }}"
+
+          UPLOAD_CMD="az storage blob upload \
+            --account-name ${{ inputs.storage-account-name }} \
+            --container-name ${{ inputs.container-name }} \
+            --file ${{ inputs.source-path }} \
+            --name ${{ inputs.destination-path }}$(basename ${{ inputs.source-path }}) \
+            --auth-mode login \
+            --overwrite ${{ inputs.overwrite }}"
+
+          if [ -n "${{ inputs.content-type }}" ]; then
+            UPLOAD_CMD="$UPLOAD_CMD --content-type ${{ inputs.content-type }}"
+          fi
+
+          if eval "$UPLOAD_CMD"; then
+            UPLOAD_COUNT=1
+            STATUS="success"
+            echo "✅ Succeeded: 1 file uploaded"
+          else
+            echo "❌ Failed: Could not upload file"
+            exit 1
+          fi
+
+        # Upload directory
+        elif [ -d "${{ inputs.source-path }}" ]; then
+          echo "📂 Uploading directory: ${{ inputs.source-path }}"
+          echo "   → Storage: ${{ inputs.storage-account-name }}/${{ inputs.container-name }}"
+
+          UPLOAD_CMD="az storage blob upload-batch \
+            --account-name ${{ inputs.storage-account-name }} \
+            --destination ${{ inputs.container-name }} \
+            --source ${{ inputs.source-path }} \
+            --auth-mode login \
+            --overwrite ${{ inputs.overwrite }}"
+
+          if [ -n "${{ inputs.destination-path }}" ]; then
+            UPLOAD_CMD="$UPLOAD_CMD --destination-path ${{ inputs.destination-path }}"
+          fi
+
+          if [ -n "${{ inputs.content-type }}" ]; then
+            UPLOAD_CMD="$UPLOAD_CMD --content-type ${{ inputs.content-type }}"
+          fi
+
+          if UPLOAD_OUTPUT=$(eval "$UPLOAD_CMD" 2>&1); then
+            UPLOAD_COUNT=$(echo "$UPLOAD_OUTPUT" | grep -c '"Blob"' || echo "0")
+            STATUS="success"
+            echo "✅ Succeeded: $UPLOAD_COUNT files uploaded"
+          else
+            echo "❌ Failed: Could not upload directory"
+            echo "$UPLOAD_OUTPUT"
+            exit 1
+          fi
+        else
+          echo "❌ Failed: Source path is neither a file nor a directory"
+          exit 1
+        fi
+
+        echo "status=$STATUS" >> $GITHUB_OUTPUT
+        echo "count=$UPLOAD_COUNT" >> $GITHUB_OUTPUT
+
+        echo "::endgroup::"
+
+    - name: Upload summary
+      if: success()
+      shell: bash
+      run: |
+        echo "::notice::✅ Upload succeeded: ${{ steps.upload.outputs.count }} file(s) uploaded to ${{ inputs.storage-account-name }}/${{ inputs.container-name }}"
+
+        echo "### ✅ Azure Blob Storage Upload Successful" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Storage Account | \`${{ inputs.storage-account-name }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Container | \`${{ inputs.container-name }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Source Path | \`${{ inputs.source-path }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Destination | \`${{ inputs.destination-path || '<root>' }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Files Uploaded | **${{ steps.upload.outputs.count }}** |" >> $GITHUB_STEP_SUMMARY
+
+    - name: Upload failure summary
+      if: failure()
+      shell: bash
+      run: |
+        echo "::error::❌ Upload failed for ${{ inputs.storage-account-name }}/${{ inputs.container-name }}"
+
+        echo "### ❌ Azure Blob Storage Upload Failed" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Storage Account | \`${{ inputs.storage-account-name }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Container | \`${{ inputs.container-name }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Source Path | \`${{ inputs.source-path }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Note:** Ensure the storage account and container exist before running this action." >> $GITHUB_STEP_SUMMARY

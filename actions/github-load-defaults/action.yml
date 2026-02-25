@@ -1,0 +1,143 @@
+# GitHub - Load Defaults from defaults.yaml configuration file.
+# This action reads organizational repository defaults and outputs them as JSON
+# for use in validation summaries, configuration previews, and YAML generation.
+#
+# Key features:
+# - Auto-installs yq if not available
+# - Loads repository_defaults from defaults.yaml
+# - Converts to JSON for easy parsing
+# - Provides grouped logging for cleaner output
+# - Validates JSON output with jq
+#
+# Usage Pattern:
+#   - uses: paloitmbb/mss-devops-workflow/actions/github-load-defaults@main
+#     with:
+#       defaults-file: 'data/defaults.yaml'
+#
+# Security: No secrets required - reads configuration files only
+
+name: 'GitHub - Load Defaults'
+description: 'GitHub - Load Defaults from defaults.yaml and output as JSON for configuration preview and validation'
+
+inputs:
+  defaults-file:
+    description: 'Path to defaults YAML file'
+    required: false
+    default: 'data/defaults.yaml'
+
+  yq-download-url:
+    description: 'URL to download yq binary (defaults to latest release)'
+    required: false
+    default: 'https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64'
+
+outputs:
+  defaults:
+    description: 'Repository defaults as JSON string'
+    value: ${{ steps.load.outputs.defaults }}
+
+  visibility:
+    description: 'Default repository visibility'
+    value: ${{ steps.parse.outputs.visibility }}
+
+  has-issues:
+    description: 'Default has_issues setting'
+    value: ${{ steps.parse.outputs.has-issues }}
+
+  has-projects:
+    description: 'Default has_projects setting'
+    value: ${{ steps.parse.outputs.has-projects }}
+
+  has-wiki:
+    description: 'Default has_wiki setting'
+    value: ${{ steps.parse.outputs.has-wiki }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install yq if not available
+      id: install-yq
+      shell: bash
+      run: |
+        echo "::group::Install yq"
+
+        # Check if yq is already available
+        if command -v yq &> /dev/null; then
+          echo "✅ yq is already installed"
+          yq --version
+        else
+          echo "📦 Installing yq..."
+          sudo wget -qO /usr/local/bin/yq ${{ inputs.yq-download-url }}
+          sudo chmod +x /usr/local/bin/yq
+          echo "✅ yq installed successfully"
+          yq --version
+        fi
+
+        echo "::endgroup::"
+
+    - name: Load defaults from YAML file
+      id: load
+      shell: bash
+      run: |
+        echo "::group::GitHub - Load Defaults"
+
+        DEFAULTS_FILE="${{ inputs.defaults-file }}"
+
+        # Check if defaults file exists
+        if [ ! -f "$DEFAULTS_FILE" ]; then
+          echo "❌ Error: Defaults file not found: $DEFAULTS_FILE"
+          echo "Please ensure the file exists and the path is correct."
+          exit 1
+        fi
+
+        echo "📄 Loading defaults from: $DEFAULTS_FILE"
+
+        # GitHub - Load Defaults from defaults.yaml
+        DEFAULTS=$(yq eval '.repository_defaults' "$DEFAULTS_FILE" -o json)
+
+        # Validate JSON output
+        if ! echo "$DEFAULTS" | jq empty 2>/dev/null; then
+          echo "❌ Error: Failed to parse defaults as valid JSON"
+          exit 1
+        fi
+
+        echo "✅ Loaded defaults successfully"
+        echo ""
+        echo "Defaults preview:"
+        echo "$DEFAULTS" | jq '.'
+
+        # Store for use in other steps
+        {
+          echo "defaults<<JSONEOF"
+          echo "$DEFAULTS"
+          echo "JSONEOF"
+        } >> $GITHUB_OUTPUT
+
+        echo "::endgroup::"
+
+    - name: Parse individual default values
+      id: parse
+      shell: bash
+      run: |
+        echo "::group::Parse Default Values"
+
+        DEFAULTS='${{ steps.load.outputs.defaults }}'
+
+        # Extract commonly used values
+        VISIBILITY=$(echo "$DEFAULTS" | jq -r '.visibility // "private"')
+        HAS_ISSUES=$(echo "$DEFAULTS" | jq -r '.features.has_issues // true')
+        HAS_PROJECTS=$(echo "$DEFAULTS" | jq -r '.features.has_projects // false')
+        HAS_WIKI=$(echo "$DEFAULTS" | jq -r '.features.has_wiki // false')
+
+        echo "Parsed values:"
+        echo "  visibility: $VISIBILITY"
+        echo "  has_issues: $HAS_ISSUES"
+        echo "  has_projects: $HAS_PROJECTS"
+        echo "  has_wiki: $HAS_WIKI"
+
+        # Set individual outputs for convenience
+        echo "visibility=$VISIBILITY" >> $GITHUB_OUTPUT
+        echo "has-issues=$HAS_ISSUES" >> $GITHUB_OUTPUT
+        echo "has-projects=$HAS_PROJECTS" >> $GITHUB_OUTPUT
+        echo "has-wiki=$HAS_WIKI" >> $GITHUB_OUTPUT
+
+        echo "::endgroup::"

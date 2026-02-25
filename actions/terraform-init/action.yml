@@ -1,0 +1,71 @@
+
+name: 'Terraform Init'
+description: 'Initialize Terraform working directory with Azure Storage backend'
+
+inputs:
+  working-directory:
+    description: 'Working directory containing Terraform code'
+    required: true
+    default: '.'
+  enable-backend:
+    description: 'Enable backend configuration (set to false for security scans)'
+    required: false
+    default: 'true'
+  backend-config-file:
+    description: 'Path to backend configuration file (e.g., backend.tfvars)'
+    required: false
+    default: ''
+  backend-config:
+    description: 'Inline backend configuration (key=value pairs, newline-separated)'
+    required: false
+    default: ''
+  # Note: Azure credentials come from environment variables set by azure-oidc-login action
+  # Requires ARM_CLIENT_ID, ARM_TENANT_ID, ARM_SUBSCRIPTION_ID, ARM_USE_OIDC
+
+outputs:
+  backend-enabled:
+    description: 'Whether backend was enabled for initialization'
+    value: ${{ inputs.enable-backend }}
+
+runs:
+  using: composite
+  steps:
+    - name: Terraform Init
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        # Backend disabled mode is used for scan-only workflows without backend access.
+        echo "::group::Terraform Init"
+
+        if [ "${{ inputs.enable-backend }}" == "false" ]; then
+          echo "Initializing without backend (for security scans)..."
+          terraform init -backend=false
+        else
+          echo "Initializing with Azure Storage backend..."
+
+          # Build terraform init command with backend config
+          INIT_CMD="terraform init"
+
+          # Add backend config file if provided
+          if [ -n "${{ inputs.backend-config-file }}" ]; then
+            echo "Using backend config file: ${{ inputs.backend-config-file }}"
+            INIT_CMD="$INIT_CMD -backend-config=${{ inputs.backend-config-file }}"
+          fi
+
+          # Add inline backend config if provided
+          if [ -n "${{ inputs.backend-config }}" ]; then
+            echo "Using inline backend configuration"
+            # Parse newline-separated key=value pairs
+            while IFS= read -r line; do
+              if [ -n "$line" ]; then
+                INIT_CMD="$INIT_CMD -backend-config=\"$line\""
+              fi
+            done <<< "${{ inputs.backend-config }}"
+          fi
+
+          # Execute init command
+          eval $INIT_CMD
+        fi
+
+        echo "✅ Terraform initialized successfully"
+        echo "::endgroup::"

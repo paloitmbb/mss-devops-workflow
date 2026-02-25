@@ -1,0 +1,79 @@
+name: 'Security - Scan Checkov'
+description: 'Run Checkov IaC security scanning with SARIF upload'
+
+inputs:
+  enabled:
+    description: 'Enable Checkov scanning (true/false)'
+    required: true
+
+  working-directory:
+    description: 'Working directory containing Terraform code'
+    required: true
+
+  severity:
+    description: 'Minimum severity to fail (CRITICAL, HIGH, MEDIUM, LOW)'
+    required: true
+
+  environment:
+    description: 'Target environment for SARIF category naming'
+    required: true
+
+  var-file:
+    description: 'Terraform variable file (optional)'
+    required: false
+    default: ''
+
+  continue-on-error:
+    description: 'Continue workflow if scan step fails (recommended: true for visibility)'
+    required: false
+    default: 'true'
+
+outputs:
+  outcome:
+    description: 'Scan outcome (success/failure/skipped)'
+    value: ${{ steps.result.outputs.outcome }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Run Security - Scan Checkov
+      id: scan
+      if: inputs.enabled == 'true'
+      continue-on-error: ${{ inputs.continue-on-error == 'true' }}
+      uses: bridgecrewio/checkov-action@f34885219720066007f948b843e747bb136aa223 # v12.3081.0
+      with:
+        directory: ${{ inputs.working-directory }}
+        framework: terraform
+        output_format: sarif
+        output_file_path: checkov-results.sarif
+        download_external_modules: false
+        var_file: ${{ inputs.var-file }}
+
+    - name: Upload Checkov SARIF
+      if: inputs.enabled == 'true' && always()
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@7434149006143a4d75b82a2f411ef15b03ccc2d7 # v4.32.2
+      with:
+        sarif_file: checkov-results.sarif
+        category: checkov-${{ inputs.environment }}
+        wait-for-processing: true
+
+    - name: Set outcome
+      id: result
+      if: always()
+      shell: bash
+      run: |
+        if [ "${{ inputs.enabled }}" != "true" ]; then
+          echo "outcome=skipped" >> $GITHUB_OUTPUT
+          echo "⏭️ Checkov: Skipped (disabled)"
+        elif [ "${{ steps.scan.outcome }}" == "success" ] && [ -f "checkov-results.sarif" ]; then
+          echo "outcome=success" >> $GITHUB_OUTPUT
+          echo "✅ Checkov: Passed"
+        else
+          echo "outcome=failure" >> $GITHUB_OUTPUT
+          echo "❌ Checkov: Failed"
+          if [ ! -f "checkov-results.sarif" ]; then
+            echo "::warning::Checkov SARIF file not generated - scan may have errored"
+          fi
+          exit 1
+        fi

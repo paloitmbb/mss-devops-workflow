@@ -1,0 +1,269 @@
+name: "Migration Upload Logs"
+description: "Generates a comprehensive migration log and uploads it to Azure Blob Storage"
+
+inputs:
+  # ── Azure credentials ──
+  azure-client-id:
+    description: "Azure AD client ID for OIDC authentication"
+    required: true
+  azure-tenant-id:
+    description: "Azure AD tenant ID"
+    required: true
+  azure-subscription-id:
+    description: "Azure subscription ID"
+    required: true
+
+  # ── Azure Storage ──
+  storage-account:
+    description: "Azure Storage Account name"
+    required: false
+    default: "mbbtfstate"
+  container-name:
+    description: "Azure Blob Storage container name for migration logs"
+    required: false
+    default: "migration-logs"
+
+  # ── Source repository details ──
+  source-org:
+    description: "Source GitHub organization"
+    required: true
+  source-repo:
+    description: "Source repository name"
+    required: true
+  source-default-branch:
+    description: "Source repository default branch"
+    required: false
+    default: "main"
+  source-head-sha:
+    description: "Source repository HEAD SHA"
+    required: false
+    default: ""
+  source-branches:
+    description: "Number of branches in source repository"
+    required: false
+    default: "0"
+  source-tags:
+    description: "Number of tags in source repository"
+    required: false
+    default: "0"
+  source-pr-count:
+    description: "Number of PRs in source repository"
+    required: false
+    default: "0"
+  source-issue-count:
+    description: "Number of issues in source repository"
+    required: false
+    default: "0"
+  source-release-count:
+    description: "Number of releases in source repository"
+    required: false
+    default: "0"
+  source-repo-size:
+    description: "Size of source repository"
+    required: false
+    default: "0"
+  source-is-archived:
+    description: "Whether source repository is archived"
+    required: false
+    default: "false"
+  source-last-push:
+    description: "Last push date of source repository"
+    required: false
+    default: ""
+
+  # ── Target repository details ──
+  target-org:
+    description: "Target GitHub organization"
+    required: true
+  target-repo:
+    description: "Target repository name"
+    required: true
+  target-visibility:
+    description: "Target repository visibility"
+    required: false
+    default: "private"
+
+  # ── Migration options ──
+  migration-options:
+    description: "Migration options selected"
+    required: false
+    default: ""
+  archive-source:
+    description: "Whether source was archived"
+    required: false
+    default: "false"
+  admins:
+    description: "Admin collaborators"
+    required: false
+    default: ""
+  team-mappings:
+    description: "Team access mappings"
+    required: false
+    default: ""
+  justification:
+    description: "Migration justification"
+    required: false
+    default: ""
+
+  # ── Results ──
+  cutover-result:
+    description: "Cutover job result"
+    required: false
+    default: ""
+  post-migration-result:
+    description: "Post-migration job result"
+    required: false
+    default: ""
+  secret-count:
+    description: "Number of secrets found"
+    required: false
+    default: "0"
+  secret-names:
+    description: "Secret names found"
+    required: false
+    default: ""
+  secret-error:
+    description: "Secret listing error message"
+    required: false
+    default: ""
+
+  # ── GitHub context ──
+  issue-number:
+    description: "Issue number for the migration request"
+    required: true
+  run-id:
+    description: "GitHub Actions run ID"
+    required: true
+  run-url:
+    description: "GitHub Actions run URL"
+    required: true
+
+outputs:
+  log-uploaded:
+    description: "Whether the log was uploaded successfully"
+    value: ${{ steps.upload.outputs.log_uploaded }}
+  log-blob-name:
+    description: "The blob name of the uploaded log"
+    value: ${{ steps.upload.outputs.log_blob_name }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Azure Login with OIDC
+      uses: azure/login@bbcc074a232a35d7283353c18aabf0de1d557775
+      with:
+        client-id: ${{ inputs.azure-client-id }}
+        tenant-id: ${{ inputs.azure-tenant-id }}
+        subscription-id: ${{ inputs.azure-subscription-id }}
+
+    - name: Generate migration log
+      id: generate-log
+      shell: bash
+      run: |
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        DATE_PREFIX=$(date -u +"%Y/%m/%d")
+        LOG_FILE="/tmp/migration-log.json"
+
+        cat > "$LOG_FILE" << ENDLOG
+        {
+          "migration_id": "${{ inputs.run-id }}",
+          "timestamp": "${TIMESTAMP}",
+          "workflow_run_url": "${{ inputs.run-url }}",
+          "issue_number": ${{ inputs.issue-number }},
+          "source": {
+            "organization": "${{ inputs.source-org }}",
+            "repository": "${{ inputs.source-repo }}",
+            "default_branch": "${{ inputs.source-default-branch }}",
+            "head_sha": "${{ inputs.source-head-sha }}",
+            "branches": "${{ inputs.source-branches }}",
+            "tags": "${{ inputs.source-tags }}",
+            "pr_count": "${{ inputs.source-pr-count }}",
+            "issue_count": "${{ inputs.source-issue-count }}",
+            "release_count": "${{ inputs.source-release-count }}",
+            "repo_size": "${{ inputs.source-repo-size }}",
+            "is_archived": "${{ inputs.source-is-archived }}",
+            "last_push": "${{ inputs.source-last-push }}"
+          },
+          "target": {
+            "organization": "${{ inputs.target-org }}",
+            "repository": "${{ inputs.target-repo }}",
+            "visibility": "${{ inputs.target-visibility }}"
+          },
+          "options": {
+            "migration_options": "${{ inputs.migration-options }}",
+            "archive_source": "${{ inputs.archive-source }}",
+            "admins": "${{ inputs.admins }}",
+            "team_mappings": $(echo "${{ inputs.team-mappings }}" | jq -Rs .),
+            "justification": $(echo "${{ inputs.justification }}" | jq -Rs .)
+          },
+          "results": {
+            "cutover": "${{ inputs.cutover-result }}",
+            "post_migration": "${{ inputs.post-migration-result }}",
+            "secret_count": "${{ inputs.secret-count }}",
+            "secret_names": "${{ inputs.secret-names }}",
+            "secret_error": "${{ inputs.secret-error }}"
+          }
+        }
+        ENDLOG
+
+        # Clean up the JSON (remove leading whitespace from heredoc)
+        python3 -c "
+        import json
+        with open('${LOG_FILE}') as f:
+            data = json.load(f)
+        with open('${LOG_FILE}', 'w') as f:
+            json.dump(data, f, indent=2)
+        "
+
+        SRC_ORG="${{ inputs.source-org }}"
+        SRC_REPO="${{ inputs.source-repo }}"
+        TGT_ORG="${{ inputs.target-org }}"
+        TGT_REPO="${{ inputs.target-repo }}"
+        RUN_ID="${{ inputs.run-id }}"
+
+        BLOB_NAME="${DATE_PREFIX}/${SRC_ORG}_${SRC_REPO}_to_${TGT_ORG}_${TGT_REPO}_${RUN_ID}.json"
+        echo "log_file=${LOG_FILE}" >> $GITHUB_OUTPUT
+        echo "blob_name=${BLOB_NAME}" >> $GITHUB_OUTPUT
+
+        echo "📋 Migration log generated:"
+        cat "$LOG_FILE"
+
+    - name: Upload log to Azure Blob Storage
+      id: upload
+      shell: bash
+      run: |
+        LOG_FILE="${{ steps.generate-log.outputs.log_file }}"
+        BLOB_NAME="${{ steps.generate-log.outputs.blob_name }}"
+        STORAGE_ACCOUNT="${{ inputs.storage-account }}"
+        CONTAINER="${{ inputs.container-name }}"
+
+        echo "📤 Uploading migration log to Azure Blob Storage..."
+        echo "   Storage Account: ${STORAGE_ACCOUNT}"
+        echo "   Container: ${CONTAINER}"
+        echo "   Blob: ${BLOB_NAME}"
+
+        # Create container if it doesn't exist
+        az storage container create \
+          --name "$CONTAINER" \
+          --account-name "$STORAGE_ACCOUNT" \
+          --auth-mode login \
+          --only-show-errors 2>/dev/null || true
+
+        # Upload the log file
+        az storage blob upload \
+          --account-name "$STORAGE_ACCOUNT" \
+          --container-name "$CONTAINER" \
+          --name "$BLOB_NAME" \
+          --file "$LOG_FILE" \
+          --content-type "application/json" \
+          --auth-mode login \
+          --overwrite
+
+        if [ $? -eq 0 ]; then
+          echo "✅ Migration log uploaded successfully"
+          echo "log_uploaded=true" >> $GITHUB_OUTPUT
+          echo "log_blob_name=${BLOB_NAME}" >> $GITHUB_OUTPUT
+        else
+          echo "⚠️ Failed to upload migration log"
+          echo "log_uploaded=false" >> $GITHUB_OUTPUT
+        fi

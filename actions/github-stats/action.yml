@@ -1,0 +1,577 @@
+name: "GitHub Repository Stats"
+description: "Gather repository statistics including branches, tags, PRs, issues, releases, and security feature status via the GitHub API"
+
+inputs:
+  repository:
+    description: "Full repository name (org/repo)"
+    required: true
+  token:
+    description: "GitHub PAT with read access to the repository"
+    required: true
+
+outputs:
+  repo_name:
+    description: "Full repository name (org/repo)"
+    value: ${{ steps.stats.outputs.repo_name }}
+  is_archived:
+    description: "Whether the repo is archived"
+    value: ${{ steps.stats.outputs.is_archived }}
+  repo_size:
+    description: "Repository size (human readable)"
+    value: ${{ steps.stats.outputs.repo_size }}
+  default_branch:
+    description: "Default branch name"
+    value: ${{ steps.stats.outputs.default_branch }}
+  head_sha:
+    description: "HEAD commit SHA of default branch"
+    value: ${{ steps.stats.outputs.head_sha }}
+  branches:
+    description: "Total number of branches"
+    value: ${{ steps.stats.outputs.branches }}
+  tags:
+    description: "Total number of tags"
+    value: ${{ steps.stats.outputs.tags }}
+  protected_branches:
+    description: "Number of protected branches"
+    value: ${{ steps.stats.outputs.protected_branches }}
+  pr_count:
+    description: "Total number of pull requests (all states)"
+    value: ${{ steps.stats.outputs.pr_count }}
+  issue_count:
+    description: "Total number of issues (all states)"
+    value: ${{ steps.stats.outputs.issue_count }}
+  release_count:
+    description: "Total number of releases"
+    value: ${{ steps.stats.outputs.release_count }}
+  code_scanning_enabled:
+    description: "Whether code scanning is enabled"
+    value: ${{ steps.stats.outputs.code_scanning_enabled }}
+  secret_scanning_enabled:
+    description: "Whether secret scanning is enabled"
+    value: ${{ steps.stats.outputs.secret_scanning_enabled }}
+  dependabot_alerts_enabled:
+    description: "Whether Dependabot alerts are enabled"
+    value: ${{ steps.stats.outputs.dependabot_alerts_enabled }}
+  last_push:
+    description: "Date/time when a push was last made"
+    value: ${{ steps.stats.outputs.last_push }}
+  last_update:
+    description: "Date/time when an update was last made"
+    value: ${{ steps.stats.outputs.last_update }}
+  pr_review_count:
+    description: "Number of pull request reviews"
+    value: ${{ steps.stats.outputs.pr_review_count }}
+  created:
+    description: "Date/time when the repository was created"
+    value: ${{ steps.stats.outputs.created }}
+  has_codeowners:
+    description: "Whether a CODEOWNERS file exists in the repository"
+    value: ${{ steps.stats.outputs.has_codeowners }}
+  variables_count:
+    description: "Total number of repository variables"
+    value: ${{ steps.stats.outputs.variables_count }}
+  secrets_count:
+    description: "Total number of repository secrets"
+    value: ${{ steps.stats.outputs.secrets_count }}
+  variables_list:
+    description: "Comma-separated list of repository variable names"
+    value: ${{ steps.stats.outputs.variables_list }}
+  secrets_list:
+    description: "Comma-separated list of repository secret names"
+    value: ${{ steps.stats.outputs.secrets_list }}
+  webhook_count:
+    description: "Total number of repository webhooks"
+    value: ${{ steps.stats.outputs.webhook_count }}
+  webhook_list:
+    description: "Comma-separated list of webhook URLs"
+    value: ${{ steps.stats.outputs.webhook_list }}
+  environments_list:
+    description: "Comma-separated list of repository environment names"
+    value: ${{ steps.stats.outputs.environments_list }}
+  env_secrets_list:
+    description: "Environment secrets in format ENV_NAME:SECRET1|SECRET2, comma-separated per environment"
+    value: ${{ steps.stats.outputs.env_secrets_list }}
+  env_variables_list:
+    description: "Environment variables in format ENV_NAME:VAR1|VAR2, comma-separated per environment"
+    value: ${{ steps.stats.outputs.env_variables_list }}
+  org_secrets_count:
+    description: "Total number of organization secrets accessible to this repo"
+    value: ${{ steps.stats.outputs.org_secrets_count }}
+  org_secrets_list:
+    description: "Comma-separated list of organization secret names accessible to this repo"
+    value: ${{ steps.stats.outputs.org_secrets_list }}
+  org_variables_count:
+    description: "Total number of organization variables accessible to this repo"
+    value: ${{ steps.stats.outputs.org_variables_count }}
+  org_variables_list:
+    description: "Comma-separated list of organization variable names accessible to this repo"
+    value: ${{ steps.stats.outputs.org_variables_list }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Gather repository stats
+      id: stats
+      shell: bash
+      run: |
+        REPO="${{ inputs.repository }}"
+        SRC_ORG="${REPO%%/*}"
+        SRC_REPO="${REPO##*/}"
+        TOKEN="${{ inputs.token }}"
+
+        echo "📊 Recording repository state for ${SRC_ORG}/${SRC_REPO}..."
+
+        # ── Repo metadata ──
+        REPO_JSON=$(curl -s \
+          -H "Authorization: Bearer $TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${SRC_ORG}/${SRC_REPO}")
+
+        REPO_NAME=$(echo "$REPO_JSON" | jq -r '.full_name // "unknown"')
+        IS_ARCHIVED=$(echo "$REPO_JSON" | jq -r '.archived // false')
+        REPO_SIZE=$(echo "$REPO_JSON" | jq -r '.size // 0')
+        DEFAULT_BRANCH=$(echo "$REPO_JSON" | jq -r '.default_branch // "main"')
+        LAST_PUSH=$(echo "$REPO_JSON" | jq -r '.pushed_at // "unknown"')
+        LAST_UPDATE=$(echo "$REPO_JSON" | jq -r '.updated_at // "unknown"')
+        CREATED=$(echo "$REPO_JSON" | jq -r '.created_at // "unknown"')
+
+        # Convert size to human readable
+        if [ "$REPO_SIZE" -ge 1048576 ]; then
+          REPO_SIZE_DISPLAY="$((REPO_SIZE / 1048576)) GB"
+        elif [ "$REPO_SIZE" -ge 1024 ]; then
+          REPO_SIZE_DISPLAY="$((REPO_SIZE / 1024)) MB"
+        else
+          REPO_SIZE_DISPLAY="${REPO_SIZE} KB"
+        fi
+
+        # ── Branch count (paginated) ──
+        BRANCH_PAGE=1
+        BRANCHES=0
+        while true; do
+          BRANCH_RESP=$(curl -s \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${SRC_ORG}/${SRC_REPO}/branches?per_page=100&page=${BRANCH_PAGE}")
+          COUNT=$(echo "$BRANCH_RESP" | jq 'length')
+          BRANCHES=$((BRANCHES + COUNT))
+          if [ "$COUNT" -lt 100 ]; then break; fi
+          BRANCH_PAGE=$((BRANCH_PAGE + 1))
+        done
+
+        # ── Tag count (paginated) ──
+        TAG_PAGE=1
+        TAGS=0
+        while true; do
+          TAG_RESP=$(curl -s \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${SRC_ORG}/${SRC_REPO}/tags?per_page=100&page=${TAG_PAGE}")
+          COUNT=$(echo "$TAG_RESP" | jq 'length')
+          TAGS=$((TAGS + COUNT))
+          if [ "$COUNT" -lt 100 ]; then break; fi
+          TAG_PAGE=$((TAG_PAGE + 1))
+        done
+
+        # ── HEAD SHA ──
+        HEAD_SHA=$(curl -s \
+          -H "Authorization: Bearer $TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${SRC_ORG}/${SRC_REPO}/branches/${DEFAULT_BRANCH}" | jq -r '.commit.sha // "unknown"')
+
+        # ── Protected branch count (paginated) ──
+        PROTECTED_BRANCHES=0
+        PB_PAGE=1
+        while true; do
+          PB_RESP=$(curl -s \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${SRC_ORG}/${SRC_REPO}/branches?protected=true&per_page=100&page=${PB_PAGE}")
+          COUNT=$(echo "$PB_RESP" | jq 'if type == "array" then length else 0 end')
+          PROTECTED_BRANCHES=$((PROTECTED_BRANCHES + COUNT))
+          if [ "$COUNT" -lt 100 ]; then break; fi
+          PB_PAGE=$((PB_PAGE + 1))
+        done
+
+        # ── PR count (all states) ──
+        PR_COUNT=$(curl -s \
+          -H "Authorization: Bearer $TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/search/issues?q=repo:${SRC_ORG}/${SRC_REPO}+type:pr" | jq -r '.total_count // 0')
+
+        # ── Issue count (all states) ──
+        ISSUE_COUNT=$(curl -s \
+          -H "Authorization: Bearer $TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/search/issues?q=repo:${SRC_ORG}/${SRC_REPO}+type:issue" | jq -r '.total_count // 0')
+
+        # ── Release count ──
+        RELEASE_COUNT=$(curl -s \
+          -H "Authorization: Bearer $TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${SRC_ORG}/${SRC_REPO}/releases?per_page=1")
+        RELEASE_TOTAL=$(curl -s -I \
+          -H "Authorization: Bearer $TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${SRC_ORG}/${SRC_REPO}/releases?per_page=1" | \
+          grep -i '^link:' | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p' || true)
+        if [ -z "$RELEASE_TOTAL" ]; then
+          RELEASE_TOTAL=$(echo "$RELEASE_COUNT" | jq 'if type == "array" then length else 0 end')
+        fi
+
+        # ── PR review count (paginated via search) ──
+        PR_REVIEW_COUNT=0
+        # List merged PRs and count those with at least one review
+        PR_REVIEW_PAGE=1
+        while true; do
+          PR_REVIEW_RESP=$(curl -s \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${SRC_ORG}/${SRC_REPO}/pulls?state=all&per_page=100&page=${PR_REVIEW_PAGE}")
+          PR_BATCH=$(echo "$PR_REVIEW_RESP" | jq 'if type == "array" then length else 0 end')
+          if [ "$PR_BATCH" -eq 0 ]; then break; fi
+          for PR_NUM in $(echo "$PR_REVIEW_RESP" | jq -r '.[].number'); do
+            REVIEWS=$(curl -s \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${SRC_ORG}/${SRC_REPO}/pulls/${PR_NUM}/reviews?per_page=1")
+            REV_COUNT=$(echo "$REVIEWS" | jq 'if type == "array" then length else 0 end')
+            if [ "$REV_COUNT" -gt 0 ]; then
+              PR_REVIEW_COUNT=$((PR_REVIEW_COUNT + 1))
+            fi
+          done
+          if [ "$PR_BATCH" -lt 100 ]; then break; fi
+          PR_REVIEW_PAGE=$((PR_REVIEW_PAGE + 1))
+        done
+
+        # ── Security features status ──
+        # Code Scanning
+        CS_RESP=$(curl -s -o /dev/null -w "%{http_code}" \
+          -H "Authorization: Bearer $TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${SRC_ORG}/${SRC_REPO}/code-scanning/alerts?per_page=1")
+        if [ "$CS_RESP" = "200" ]; then
+          CODE_SCANNING_ENABLED="true"
+        else
+          CODE_SCANNING_ENABLED="false"
+        fi
+
+        # Secret Scanning
+        SECRET_SCANNING_STATUS=$(echo "$REPO_JSON" | jq -r '.security_and_analysis.secret_scanning.status // "disabled"')
+        if [ "$SECRET_SCANNING_STATUS" = "enabled" ]; then
+          SECRET_SCANNING_ENABLED="true"
+        else
+          SECRET_SCANNING_ENABLED="false"
+        fi
+
+        # Dependabot Alerts
+        DA_RESP=$(curl -s -o /dev/null -w "%{http_code}" \
+          -H "Authorization: Bearer $TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${SRC_ORG}/${SRC_REPO}/vulnerability-alerts")
+        if [ "$DA_RESP" = "204" ]; then
+          DEPENDABOT_ALERTS_ENABLED="true"
+        else
+          DEPENDABOT_ALERTS_ENABLED="false"
+        fi
+
+        # ── Repository Variables count and names ──
+        VARIABLES_COUNT=0
+        VARIABLES_LIST=""
+        VAR_PAGE=1
+        while true; do
+          VARS_RESP=$(curl -s \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${SRC_ORG}/${SRC_REPO}/actions/variables?per_page=100&page=${VAR_PAGE}")
+          if [ "$VAR_PAGE" -eq 1 ]; then
+            VARIABLES_COUNT=$(echo "$VARS_RESP" | jq -r '.total_count // 0')
+          fi
+          VAR_NAMES=$(echo "$VARS_RESP" | jq -r '.variables[]?.name // empty')
+          if [ -z "$VAR_NAMES" ]; then break; fi
+          for VNAME in $VAR_NAMES; do
+            if [ -z "$VARIABLES_LIST" ]; then
+              VARIABLES_LIST="$VNAME"
+            else
+              VARIABLES_LIST="${VARIABLES_LIST},${VNAME}"
+            fi
+          done
+          VAR_BATCH=$(echo "$VARS_RESP" | jq '.variables | length')
+          if [ "$VAR_BATCH" -lt 100 ]; then break; fi
+          VAR_PAGE=$((VAR_PAGE + 1))
+        done
+
+        # ── Repository Secrets count and names ──
+        SECRETS_COUNT=0
+        SECRETS_LIST=""
+        SEC_PAGE=1
+        while true; do
+          SECRETS_RESP=$(curl -s \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${SRC_ORG}/${SRC_REPO}/actions/secrets?per_page=100&page=${SEC_PAGE}")
+          if [ "$SEC_PAGE" -eq 1 ]; then
+            SECRETS_COUNT=$(echo "$SECRETS_RESP" | jq -r '.total_count // 0')
+          fi
+          SEC_NAMES=$(echo "$SECRETS_RESP" | jq -r '.secrets[]?.name // empty')
+          if [ -z "$SEC_NAMES" ]; then break; fi
+          for SNAME in $SEC_NAMES; do
+            if [ -z "$SECRETS_LIST" ]; then
+              SECRETS_LIST="$SNAME"
+            else
+              SECRETS_LIST="${SECRETS_LIST},${SNAME}"
+            fi
+          done
+          SEC_BATCH=$(echo "$SECRETS_RESP" | jq '.secrets | length')
+          if [ "$SEC_BATCH" -lt 100 ]; then break; fi
+          SEC_PAGE=$((SEC_PAGE + 1))
+        done
+
+        # ── Repository Webhooks count and URLs ──
+        WEBHOOK_COUNT=0
+        WEBHOOK_LIST=""
+        WH_PAGE=1
+        while true; do
+          WH_RESP=$(curl -s \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${SRC_ORG}/${SRC_REPO}/hooks?per_page=100&page=${WH_PAGE}")
+          WH_BATCH=$(echo "$WH_RESP" | jq 'if type == "array" then length else 0 end')
+          if [ "$WH_BATCH" -eq 0 ]; then break; fi
+          WEBHOOK_COUNT=$((WEBHOOK_COUNT + WH_BATCH))
+          WH_URLS=$(echo "$WH_RESP" | jq -r '.[].config.url // empty')
+          for WURL in $WH_URLS; do
+            if [ -z "$WEBHOOK_LIST" ]; then
+              WEBHOOK_LIST="$WURL"
+            else
+              WEBHOOK_LIST="${WEBHOOK_LIST},${WURL}"
+            fi
+          done
+          if [ "$WH_BATCH" -lt 100 ]; then break; fi
+          WH_PAGE=$((WH_PAGE + 1))
+        done
+
+        # ── Environment Secrets and Variables ──
+        ENVIRONMENTS_LIST=""
+        ENV_SECRETS_LIST=""
+        ENV_VARIABLES_LIST=""
+        ENV_PAGE=1
+        while true; do
+          ENV_RESP=$(curl -s \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${SRC_ORG}/${SRC_REPO}/environments?per_page=100&page=${ENV_PAGE}")
+          ENV_NAMES=$(echo "$ENV_RESP" | jq -r '.environments[]?.name // empty')
+          if [ -z "$ENV_NAMES" ]; then break; fi
+          while IFS= read -r ENAME; do
+            [ -z "$ENAME" ] && continue
+            # Build environments list
+            if [ -z "$ENVIRONMENTS_LIST" ]; then
+              ENVIRONMENTS_LIST="$ENAME"
+            else
+              ENVIRONMENTS_LIST="${ENVIRONMENTS_LIST},${ENAME}"
+            fi
+            # URL-encode the environment name for API calls
+            ENCODED_ENAME=$(printf '%s' "$ENAME" | jq -sRr @uri)
+
+            # Fetch environment secrets
+            E_SEC_NAMES=""
+            E_SEC_PAGE=1
+            while true; do
+              E_SEC_RESP=$(curl -s \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${SRC_ORG}/${SRC_REPO}/environments/${ENCODED_ENAME}/secrets?per_page=100&page=${E_SEC_PAGE}")
+              E_SEC_BATCH=$(echo "$E_SEC_RESP" | jq -r '.secrets[]?.name // empty')
+              if [ -z "$E_SEC_BATCH" ]; then break; fi
+              for ESNAME in $E_SEC_BATCH; do
+                if [ -z "$E_SEC_NAMES" ]; then
+                  E_SEC_NAMES="$ESNAME"
+                else
+                  E_SEC_NAMES="${E_SEC_NAMES}|${ESNAME}"
+                fi
+              done
+              E_SEC_COUNT=$(echo "$E_SEC_RESP" | jq '.secrets | length')
+              if [ "$E_SEC_COUNT" -lt 100 ]; then break; fi
+              E_SEC_PAGE=$((E_SEC_PAGE + 1))
+            done
+            if [ -n "$E_SEC_NAMES" ]; then
+              ENTRY="${ENAME}:${E_SEC_NAMES}"
+              if [ -z "$ENV_SECRETS_LIST" ]; then
+                ENV_SECRETS_LIST="$ENTRY"
+              else
+                ENV_SECRETS_LIST="${ENV_SECRETS_LIST},${ENTRY}"
+              fi
+            fi
+
+            # Fetch environment variables
+            E_VAR_NAMES=""
+            E_VAR_PAGE=1
+            while true; do
+              E_VAR_RESP=$(curl -s \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${SRC_ORG}/${SRC_REPO}/environments/${ENCODED_ENAME}/variables?per_page=100&page=${E_VAR_PAGE}")
+              E_VAR_BATCH=$(echo "$E_VAR_RESP" | jq -r '.variables[]?.name // empty')
+              if [ -z "$E_VAR_BATCH" ]; then break; fi
+              for EVNAME in $E_VAR_BATCH; do
+                if [ -z "$E_VAR_NAMES" ]; then
+                  E_VAR_NAMES="$EVNAME"
+                else
+                  E_VAR_NAMES="${E_VAR_NAMES}|${EVNAME}"
+                fi
+              done
+              E_VAR_COUNT=$(echo "$E_VAR_RESP" | jq '.variables | length')
+              if [ "$E_VAR_COUNT" -lt 100 ]; then break; fi
+              E_VAR_PAGE=$((E_VAR_PAGE + 1))
+            done
+            if [ -n "$E_VAR_NAMES" ]; then
+              ENTRY="${ENAME}:${E_VAR_NAMES}"
+              if [ -z "$ENV_VARIABLES_LIST" ]; then
+                ENV_VARIABLES_LIST="$ENTRY"
+              else
+                ENV_VARIABLES_LIST="${ENV_VARIABLES_LIST},${ENTRY}"
+              fi
+            fi
+          done <<< "$ENV_NAMES"
+          ENV_BATCH=$(echo "$ENV_RESP" | jq '.environments | length')
+          if [ "$ENV_BATCH" -lt 100 ]; then break; fi
+          ENV_PAGE=$((ENV_PAGE + 1))
+        done
+
+        # ── Organization Secrets accessible to this repo ──
+        ORG_SECRETS_COUNT=0
+        ORG_SECRETS_LIST=""
+        ORG_SEC_PAGE=1
+        while true; do
+          ORG_SEC_RESP=$(curl -s \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/orgs/${SRC_ORG}/actions/secrets?per_page=100&page=${ORG_SEC_PAGE}")
+          if [ "$ORG_SEC_PAGE" -eq 1 ]; then
+            ORG_SECRETS_COUNT=$(echo "$ORG_SEC_RESP" | jq -r '.total_count // 0')
+          fi
+          ORG_SEC_NAMES=$(echo "$ORG_SEC_RESP" | jq -r '.secrets[]?.name // empty')
+          if [ -z "$ORG_SEC_NAMES" ]; then break; fi
+          for OSNAME in $ORG_SEC_NAMES; do
+            if [ -z "$ORG_SECRETS_LIST" ]; then
+              ORG_SECRETS_LIST="$OSNAME"
+            else
+              ORG_SECRETS_LIST="${ORG_SECRETS_LIST},${OSNAME}"
+            fi
+          done
+          ORG_SEC_BATCH=$(echo "$ORG_SEC_RESP" | jq '.secrets | length')
+          if [ "$ORG_SEC_BATCH" -lt 100 ]; then break; fi
+          ORG_SEC_PAGE=$((ORG_SEC_PAGE + 1))
+        done
+
+        # ── Organization Variables accessible to this repo ──
+        ORG_VARIABLES_COUNT=0
+        ORG_VARIABLES_LIST=""
+        ORG_VAR_PAGE=1
+        while true; do
+          ORG_VAR_RESP=$(curl -s \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/orgs/${SRC_ORG}/actions/variables?per_page=100&page=${ORG_VAR_PAGE}")
+          if [ "$ORG_VAR_PAGE" -eq 1 ]; then
+            ORG_VARIABLES_COUNT=$(echo "$ORG_VAR_RESP" | jq -r '.total_count // 0')
+          fi
+          ORG_VAR_NAMES=$(echo "$ORG_VAR_RESP" | jq -r '.variables[]?.name // empty')
+          if [ -z "$ORG_VAR_NAMES" ]; then break; fi
+          for OVNAME in $ORG_VAR_NAMES; do
+            if [ -z "$ORG_VARIABLES_LIST" ]; then
+              ORG_VARIABLES_LIST="$OVNAME"
+            else
+              ORG_VARIABLES_LIST="${ORG_VARIABLES_LIST},${OVNAME}"
+            fi
+          done
+          ORG_VAR_BATCH=$(echo "$ORG_VAR_RESP" | jq '.variables | length')
+          if [ "$ORG_VAR_BATCH" -lt 100 ]; then break; fi
+          ORG_VAR_PAGE=$((ORG_VAR_PAGE + 1))
+        done
+
+        # ── CODEOWNERS file check ──
+        HAS_CODEOWNERS="false"
+        for CODEOWNERS_PATH in "CODEOWNERS" ".github/CODEOWNERS" "docs/CODEOWNERS"; do
+          CO_RESP=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${SRC_ORG}/${SRC_REPO}/contents/${CODEOWNERS_PATH}")
+          if [ "$CO_RESP" = "200" ]; then
+            HAS_CODEOWNERS="true"
+            echo "   ✅ CODEOWNERS file found at ${CODEOWNERS_PATH}"
+            break
+          fi
+        done
+        if [ "$HAS_CODEOWNERS" = "false" ]; then
+          echo "   ⚠️ No CODEOWNERS file found in repository"
+        fi
+
+        # ── Set all outputs ──
+        echo "repo_name=${REPO_NAME}" >> $GITHUB_OUTPUT
+        echo "is_archived=${IS_ARCHIVED}" >> $GITHUB_OUTPUT
+        echo "repo_size=${REPO_SIZE_DISPLAY}" >> $GITHUB_OUTPUT
+        echo "default_branch=${DEFAULT_BRANCH}" >> $GITHUB_OUTPUT
+        echo "head_sha=${HEAD_SHA}" >> $GITHUB_OUTPUT
+        echo "branches=${BRANCHES}" >> $GITHUB_OUTPUT
+        echo "tags=${TAGS}" >> $GITHUB_OUTPUT
+        echo "protected_branches=${PROTECTED_BRANCHES}" >> $GITHUB_OUTPUT
+        echo "pr_count=${PR_COUNT}" >> $GITHUB_OUTPUT
+        echo "issue_count=${ISSUE_COUNT}" >> $GITHUB_OUTPUT
+        echo "release_count=${RELEASE_TOTAL}" >> $GITHUB_OUTPUT
+        echo "code_scanning_enabled=${CODE_SCANNING_ENABLED}" >> $GITHUB_OUTPUT
+        echo "secret_scanning_enabled=${SECRET_SCANNING_ENABLED}" >> $GITHUB_OUTPUT
+        echo "dependabot_alerts_enabled=${DEPENDABOT_ALERTS_ENABLED}" >> $GITHUB_OUTPUT
+        echo "last_push=${LAST_PUSH}" >> $GITHUB_OUTPUT
+        echo "last_update=${LAST_UPDATE}" >> $GITHUB_OUTPUT
+        echo "pr_review_count=${PR_REVIEW_COUNT}" >> $GITHUB_OUTPUT
+        echo "created=${CREATED}" >> $GITHUB_OUTPUT
+        echo "has_codeowners=${HAS_CODEOWNERS}" >> $GITHUB_OUTPUT
+        echo "variables_count=${VARIABLES_COUNT}" >> $GITHUB_OUTPUT
+        echo "secrets_count=${SECRETS_COUNT}" >> $GITHUB_OUTPUT
+        echo "variables_list=${VARIABLES_LIST}" >> $GITHUB_OUTPUT
+        echo "secrets_list=${SECRETS_LIST}" >> $GITHUB_OUTPUT
+        echo "webhook_count=${WEBHOOK_COUNT}" >> $GITHUB_OUTPUT
+        echo "webhook_list=${WEBHOOK_LIST}" >> $GITHUB_OUTPUT
+        echo "environments_list=${ENVIRONMENTS_LIST}" >> $GITHUB_OUTPUT
+        echo "env_secrets_list=${ENV_SECRETS_LIST}" >> $GITHUB_OUTPUT
+        echo "env_variables_list=${ENV_VARIABLES_LIST}" >> $GITHUB_OUTPUT
+        echo "org_secrets_count=${ORG_SECRETS_COUNT}" >> $GITHUB_OUTPUT
+        echo "org_secrets_list=${ORG_SECRETS_LIST}" >> $GITHUB_OUTPUT
+        echo "org_variables_count=${ORG_VARIABLES_COUNT}" >> $GITHUB_OUTPUT
+        echo "org_variables_list=${ORG_VARIABLES_LIST}" >> $GITHUB_OUTPUT
+
+        echo ""
+        echo "📊 Repository state recorded:"
+        echo "   Repo: ${REPO_NAME}"
+        echo "   Archived: ${IS_ARCHIVED}"
+        echo "   Size: ${REPO_SIZE_DISPLAY}"
+        echo "   Default Branch: ${DEFAULT_BRANCH}"
+        echo "   HEAD SHA: ${HEAD_SHA:0:12}"
+        echo "   Branches: ${BRANCHES}"
+        echo "   Tags: ${TAGS}"
+        echo "   Protected Branches: ${PROTECTED_BRANCHES}"
+        echo "   PR Count: ${PR_COUNT}"
+        echo "   Issue Count: ${ISSUE_COUNT}"
+        echo "   Releases: ${RELEASE_TOTAL}"
+        echo "   Code Scanning: ${CODE_SCANNING_ENABLED}"
+        echo "   Secret Scanning: ${SECRET_SCANNING_ENABLED}"
+        echo "   Dependabot Alerts: ${DEPENDABOT_ALERTS_ENABLED}"
+        echo "   Last Push: ${LAST_PUSH}"
+        echo "   Last Update: ${LAST_UPDATE}"
+        echo "   PR Review Count: ${PR_REVIEW_COUNT}"
+        echo "   Created: ${CREATED}"
+        echo "   CODEOWNERS: ${HAS_CODEOWNERS}"
+        echo "   Variables: ${VARIABLES_COUNT}"
+        echo "   Variable Names: ${VARIABLES_LIST}"
+        echo "   Secrets: ${SECRETS_COUNT}"
+        echo "   Secret Names: ${SECRETS_LIST}"
+        echo "   Webhooks: ${WEBHOOK_COUNT}"
+        echo "   Webhook URLs: ${WEBHOOK_LIST}"
+        echo "   Environments: ${ENVIRONMENTS_LIST}"
+        echo "   Environment Secrets: ${ENV_SECRETS_LIST}"
+        echo "   Environment Variables: ${ENV_VARIABLES_LIST}"
+        echo "   Org Secrets: ${ORG_SECRETS_COUNT}"
+        echo "   Org Secret Names: ${ORG_SECRETS_LIST}"
+        echo "   Org Variables: ${ORG_VARIABLES_COUNT}"
+        echo "   Org Variable Names: ${ORG_VARIABLES_LIST}"

@@ -1,0 +1,195 @@
+# ============================================================================
+# Terraform Plan Generation Action
+# ============================================================================
+# Purpose:
+#   Generates Terraform execution plan with optional artifact packaging,
+#   attestation signing, and GitHub Actions summary display.
+#
+# Core Functionality:
+#   1. Executes `terraform plan -out=tfplan` with optional var-file support
+#   2. Extracts plan summary from tfplan for display
+#   3. Optionally creates plan metadata (hash, artifact name) via terraform-extract-metadata action
+#   4. Optionally signs plan artifact with build provenance attestation
+#   5. Optionally uploads plan artifacts (tfplan, metadata) to GitHub
+#   6. Displays plan summary in GitHub Actions UI
+
+# ============================================================================
+
+name: 'Terraform Plan'
+description: 'Generate Terraform plan with configurable artifact upload, attestation, and summary display'
+
+inputs:
+  working-directory:
+    description: 'Working directory containing Terraform code'
+    required: false
+    default: '.'
+
+  environment:
+    description: 'Target environment (dev, staging, prod)'
+    required: true
+
+  terraform-version:
+    description: 'Terraform version (for metadata generation)'
+    required: false
+    default: '1.7.0'
+
+  var-file:
+    description: 'Terraform variable file (e.g., dev.tfvars)'
+    required: false
+    default: ''
+
+  upload-artifacts:
+    description: 'Upload plan artifacts (true/false)'
+    required: false
+    default: 'false'
+
+  generate-attestation:
+    description: 'Generate attestation for plan artifact (true/false)'
+    required: false
+    default: 'false'
+
+  generate-metadata:
+    description: 'Generate plan metadata and hash (true/false)'
+    required: false
+    default: 'false'
+
+  show-summary:
+    description: 'Show plan summary in GitHub Actions output (true/false)'
+    required: false
+    default: 'true'
+
+  artifact-retention-days:
+    description: 'Number of days to retain plan artifacts (uses repository default if not specified)'
+    required: false
+
+outputs:
+  exitcode:
+    description: 'Terraform plan exit code (0=no changes, 2=changes)'
+    value: ${{ steps.plan.outputs.exitcode }}
+
+  has-changes:
+    description: 'Whether plan detected changes (true/false)'
+    value: ${{ steps.plan.outputs.has-changes }}
+
+  plan-summary:
+    description: 'Summary of plan changes (add/change/destroy counts)'
+    value: ${{ steps.parse-summary.outputs.summary }}
+
+  plan-hash:
+    description: 'SHA256 hash of Terraform plan (if generate-metadata enabled)'
+    value: ${{ steps.metadata.outputs.plan-hash }}
+
+  artifact-name:
+    description: 'Name of uploaded plan artifact (if upload-artifacts enabled)'
+    value: ${{ steps.metadata.outputs.artifact-name }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Generate Terraform Plan
+      id: plan
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        echo "=== Generating Terraform Plan ==="
+        echo "Environment: ${{ inputs.environment }}"
+        echo "Working Directory: ${{ inputs.working-directory }}"
+
+        # Build and execute plan command
+        PLAN_CMD="terraform plan -detailed-exitcode -out=tfplan"
+        [ -n "${{ inputs.var-file }}" ] && PLAN_CMD="$PLAN_CMD -var-file=${{ inputs.var-file }}"
+
+        # Run plan (exit codes: 0=no changes, 1=error, 2=changes)
+        set +e
+        PLAN_OUTPUT=$(eval "$PLAN_CMD" 2>&1)
+        EXITCODE=$?
+        set -e
+
+        echo "$PLAN_OUTPUT"
+
+        # Validate exit code by parsing output (Terraform CLI sometimes returns wrong exit codes)
+        case "$PLAN_OUTPUT" in
+          *"Plan: "[1-9]*" to add"*|*"Plan: "[1-9]*" to change"*|*"Plan: "[1-9]*" to destroy"*)
+            EXITCODE=2; HAS_CHANGES="true" ;;
+          *"No changes"*|*"Plan: 0 to add, 0 to change, 0 to destroy"*)
+            EXITCODE=0; HAS_CHANGES="false" ;;
+          *)
+            HAS_CHANGES="false" ;;
+        esac
+
+        # Set outputs and display result
+        {
+          echo "exitcode=$EXITCODE"
+          echo "has-changes=$HAS_CHANGES"
+        } >> $GITHUB_OUTPUT
+
+        case $EXITCODE in
+          0) echo "✅ No infrastructure changes detected" ;;
+          2) echo "📝 Infrastructure changes detected" ;;
+          1) echo "❌ Terraform plan failed"; exit 1 ;;
+        esac
+
+    - name: Parse Plan Summary
+      id: parse-summary
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        # Extract plan summary from output
+        SUMMARY=$(terraform show -no-color tfplan | grep -E "Plan:|No changes" | head -n 1 || echo "Plan generated")
+        echo "summary=$SUMMARY" >> $GITHUB_OUTPUT
+        echo "Plan Summary: $SUMMARY"
+
+    - name: Save Plan Output to File
+      if: steps.plan.outputs.exitcode != '1'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        terraform show -no-color tfplan > plan-output.txt 2>&1 || echo "Unable to generate plan output" > plan-output.txt
+        echo "💾 Plan output saved to plan-output.txt"
+
+    - name: Terraform - Extract Metadata
+      id: metadata
+      if: inputs.generate-metadata == 'true' && steps.plan.outputs.exitcode == '2'
+      uses: paloitmbb/mss-devops-workflow/actions/terraform-extract-metadata@main
+      with:
+        working-directory: ${{ inputs.working-directory }}
+        environment: ${{ inputs.environment }}
+        terraform-version: ${{ inputs.terraform-version }}
+
+    - name: Attest Plan Artifact
+      if: inputs.generate-attestation == 'true' && steps.plan.outputs.exitcode == '2'
+      uses: actions/attest-build-provenance@bdd51370e0416ac948727f861e03c2f05d32d78e # v1.3.2
+      with:
+        subject-path: ${{ inputs.working-directory }}/tfplan
+
+    - name: Upload Plan Artifact
+      id: upload
+      if: inputs.upload-artifacts == 'true' && steps.plan.outputs.exitcode == '2'
+      uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
+      with:
+        name: ${{ steps.metadata.outputs.artifact-name }}
+        path: |
+          ${{ inputs.working-directory }}/tfplan
+          ${{ inputs.working-directory }}/plan-metadata.json
+        retention-days: ${{ inputs.artifact-retention-days }}
+        if-no-files-found: warn
+
+    - name: Generate Summary
+      if: inputs.show-summary == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        echo "## 📋 Terraform Plan Summary - ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        if [ "${{ steps.plan.outputs.exitcode }}" == "2" ]; then
+          echo "**Status:** 📝 Changes Detected" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.parse-summary.outputs.summary }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "**Status:** ✅ No Changes" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "No infrastructure changes detected." >> $GITHUB_STEP_SUMMARY
+        fi

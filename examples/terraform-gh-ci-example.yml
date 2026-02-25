@@ -1,0 +1,50 @@
+# Example: Terraform CI for GitHub Provider
+#
+# Use this workflow when Terraform manages GitHub organisation resources
+# (repos, teams, org settings) and state is stored in Azure Storage.
+#
+# Use this for: GitHub org IaC repos (e.g. mbb-iac)
+# Secrets needed: ORG_GITHUB_TOKEN, ARM_CLIENT_ID, ARM_TENANT_ID, ARM_SUBSCRIPTION_ID
+
+name: GitHub Provider CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '**/*.tf'
+      - 'data/**'
+  push:
+    branches: [main]
+    paths:
+      - '**/*.tf'
+      - 'data/**'
+
+permissions:
+  contents: read
+  security-events: write
+  id-token: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  github-provider-ci:
+    uses: paloitmbb/mss-devops-workflow/.github/workflows/terraform-ci-github.yml@main
+    with:
+      terraform-version: '1.7.0'
+      working-directory: '.'
+      environment: 'dev'
+      terraform-var-file: 'environments/dev/terraform.tfvars'
+      backend-config-file: 'environments/dev/backend.tfvars'
+      enable-tfsec: true
+      enable-trivy: true
+      tfsec-severity: 'HIGH'
+      trivy-severity: 'HIGH'
+      tfsec-continue-on-error: true
+      trivy-continue-on-error: true
+      aggregate-continue-on-error: false
+    secrets:
+      ORG_GITHUB_TOKEN: ${{ secrets.ORG_GITHUB_TOKEN }}
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}

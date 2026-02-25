@@ -1,0 +1,509 @@
+name: Terraform CI - Full Pipeline
+
+# ============================================================================
+# Consolidated CI Workflow
+#
+# This workflow replaces the orchestrator pattern with a single reusable
+# workflow containing all CI jobs: validate, security (parallel), and plan.
+#
+# Key improvements:
+# - Security scans run in parallel (2 separate jobs: tfsec, trivy)
+# - Time savings: ~3-5 minutes (sequential ~9-12 mins → parallel ~4-6 mins)
+# - Direct job execution (no orchestrator overhead)
+# - Conditional scanner enablement via inputs (enable-tfsec, enable-trivy)
+# - Uses common-setup and security-aggregate-results composite actions
+# - Aggregate job collects results from all enabled scanners
+# ============================================================================
+
+on:
+  workflow_call:
+    inputs:
+      terraform-version:
+        description: 'Terraform version (e.g., 1.7.0, 1.6.6, latest)'
+        required: false
+        type: string
+        default: '1.7.0'
+
+      working-directory:
+        description: 'Working directory containing Terraform code'
+        required: false
+        type: string
+        default: '.'
+
+      environment:
+        description: 'Target environment (dev, staging, prod)'
+        required: true
+        type: string
+
+      # Security Scanner Toggles
+      enable-tfsec:
+        description: 'Enable tfsec Terraform security scanning'
+        required: false
+        type: boolean
+        default: true
+
+      enable-trivy:
+        description: 'Enable Trivy security scanning'
+        required: false
+        type: boolean
+        default: true
+
+      # Security Scanner Severity Thresholds
+      tfsec-severity:
+        description: 'Minimum tfsec severity to fail (LOW, MEDIUM, HIGH, CRITICAL)'
+        required: false
+        type: string
+        default: 'HIGH'
+
+      trivy-severity:
+        description: 'Minimum Trivy severity to fail (CRITICAL, HIGH, MEDIUM, LOW)'
+        required: false
+        type: string
+        default: 'HIGH'
+
+      # Continue-on-error Control
+      tfsec-continue-on-error:
+        description: 'Continue workflow if tfsec scan fails (recommended: true for visibility)'
+        required: false
+        type: boolean
+        default: true
+
+      trivy-continue-on-error:
+        description: 'Continue workflow if Trivy scan fails (recommended: true for visibility)'
+        required: false
+        type: boolean
+        default: true
+
+      aggregate-continue-on-error:
+        description: 'Continue workflow if security aggregation fails'
+        required: false
+        type: boolean
+        default: true
+
+      # Linting
+      enable-tflint:
+        description: 'Enable tflint code quality linting'
+        required: false
+        type: boolean
+        default: true
+
+      tflint-version:
+        description: 'tflint version to use'
+        required: false
+        type: string
+        default: 'v0.60.0'
+
+      # Terraform
+      terraform-var-file:
+        description: 'Terraform variable file (e.g., dev.tfvars, prod.tfvars)'
+        required: false
+        type: string
+        default: ''
+
+      # Azure Backend Configuration
+      backend-config-file:
+        description: 'Path to Azure backend configuration file (e.g., environments/dev/backend.tfvars)'
+        required: false
+        type: string
+        default: ''
+
+      backend-config:
+        description: 'Inline Azure backend configuration (key=value pairs, newline-separated)'
+        required: false
+        type: string
+        default: ''
+
+      # Artifacts
+      artifact-retention-days:
+        description: 'Number of days to retain plan artifacts (1-90, uses repository default if not specified)'
+        required: false
+        type: number
+
+      # Execution
+      runner-os:
+        description: 'Default runner OS for all jobs (can be overridden per job)'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+
+      validate-runner-os:
+        description: 'Runner OS for validation job (defaults to runner-os)'
+        required: false
+        type: string
+        default: ''
+
+      security-runner-os:
+        description: 'Runner OS for security scan jobs (defaults to runner-os)'
+        required: false
+        type: string
+        default: ''
+
+      plan-runner-os:
+        description: 'Runner OS for plan job (defaults to runner-os)'
+        required: false
+        type: string
+        default: ''
+
+      timeout-minutes:
+        description: 'Maximum execution time in minutes for plan job'
+        required: false
+        type: number
+        default: 60
+
+      # Azure Storage for SARIF Upload
+      sarif-storage-account-name:
+        description: 'Azure Storage Account name for SARIF uploads (leave empty to skip upload)'
+        required: false
+        type: string
+        default: ''
+
+      sarif-storage-container-name:
+        description: 'Azure Storage Container name for SARIF uploads'
+        required: false
+        type: string
+        default: 'security-scans'
+
+      sarif-storage-destination-path:
+        description: 'Destination path prefix in blob storage (e.g., sarif-results/)'
+        required: false
+        type: string
+        default: 'sarif-results/'
+
+    secrets:
+      AZURE_CLIENT_ID:
+        description: 'Azure App Registration Client ID for OIDC authentication'
+        required: true
+      AZURE_TENANT_ID:
+        description: 'Azure Tenant ID for OIDC authentication'
+        required: true
+      AZURE_SUBSCRIPTION_ID:
+        description: 'Azure Subscription ID for OIDC authentication'
+        required: true
+
+    outputs:
+      # Validate outputs
+      terraform-version:
+        description: 'Installed Terraform version'
+        value: ${{ jobs.validate.outputs.terraform-version }}
+      fmt-status:
+        description: 'Terraform format check status'
+        value: ${{ jobs.validate.outputs.fmt-status }}
+      validate-status:
+        description: 'Terraform validate status'
+        value: ${{ jobs.validate.outputs.validate-status }}
+      tflint-status:
+        description: 'tflint validation status'
+        value: ${{ jobs.validate.outputs.tflint-status }}
+
+      # Security outputs
+      security-all-passed:
+        description: 'Whether all enabled security scans passed (true/false)'
+        value: ${{ jobs.aggregate-security.outputs.all-passed }}
+      tfsec-status:
+        description: 'tfsec scan status (success/failure/skipped)'
+        value: ${{ jobs.aggregate-security.outputs.tfsec-status }}
+      trivy-status:
+        description: 'Trivy scan status (success/failure/skipped)'
+        value: ${{ jobs.aggregate-security.outputs.trivy-status }}
+
+      # Plan outputs
+      plan-artifact-name:
+        description: 'Name of uploaded Terraform plan artifact'
+        value: ${{ jobs.plan.outputs.artifact-name }}
+      plan-exitcode:
+        description: 'Terraform plan exit code (0=no changes, 2=changes)'
+        value: ${{ jobs.plan.outputs.exitcode }}
+      plan-hash:
+        description: 'SHA256 hash of Terraform plan'
+        value: ${{ jobs.plan.outputs.plan-hash }}
+
+permissions:
+  contents: read
+  security-events: write
+  id-token: write
+  attestations: write
+  pull-requests: write
+  # issues: write
+  actions: read
+
+env:
+  TF_IN_AUTOMATION: 'true'
+  TF_INPUT: 'false'
+  TF_CLI_ARGS: '-no-color'
+
+jobs:
+  # ============================================================================
+  # Job 1: Terraform Validation
+  # ============================================================================
+  validate:
+    name: ✅ Validate - Syntax & Format (${{ inputs.environment }})
+    runs-on: ${{ inputs.validate-runner-os || inputs.runner-os }}
+    timeout-minutes: 15
+    outputs:
+      terraform-version: ${{ steps.setup-tf.outputs.terraform-version }}
+      fmt-status: ${{ steps.validate.outputs.fmt-status }}
+      validate-status: ${{ steps.validate.outputs.validate-status }}
+      tflint-status: ${{ steps.validate.outputs.tflint-status }}
+
+    steps:
+      - name: Terraform Setup
+        id: setup-tf
+        uses: paloitmbb/mss-devops-workflow/actions/terraform-setup@main
+        with:
+          terraform-version: ${{ inputs.terraform-version }}
+
+      - name: Terraform Init (Backend Disabled)
+        uses: paloitmbb/mss-devops-workflow/actions/terraform-init@main
+        with:
+          working-directory: ${{ inputs.working-directory }}
+          enable-backend: 'false'
+
+      - name: Terraform Validate
+        id: validate
+        uses: paloitmbb/mss-devops-workflow/actions/terraform-validate-syntax@main
+        with:
+          working-directory: ${{ inputs.working-directory }}
+          enable-tflint: ${{ inputs.enable-tflint }}
+          tflint-version: ${{ inputs.tflint-version }}
+
+      - name: Validation Results Summary
+        if: always()
+        shell: bash
+        run: |
+          echo "## 🔍 Terraform Validation Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Format (fmt) | ${{ steps.validate.outputs.fmt-status }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Syntax (validate) | ${{ steps.validate.outputs.validate-status }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Quality (tflint) | ${{ steps.validate.outputs.tflint-status }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+  # ============================================================================
+  # Job 2: Security - Scan tfsec
+  # ============================================================================
+  tfsec-scan:
+    name: 🔒 Security Scan - tfsec
+    runs-on: ${{ inputs.security-runner-os || inputs.runner-os }}
+    timeout-minutes: 15
+    if: inputs.enable-tfsec == true
+    continue-on-error: ${{ inputs.tfsec-continue-on-error }}
+    permissions:
+      id-token: write      # Required for Azure OIDC authentication
+      contents: read
+      security-events: write
+      actions: read        # Required for SARIF upload telemetry
+    outputs:
+      outcome: ${{ steps.scan.outputs.outcome }}
+
+    steps:
+      - name: Terraform Setup
+        uses: paloitmbb/mss-devops-workflow/actions/terraform-setup@main
+        with:
+          terraform-version: ${{ inputs.terraform-version }}
+
+      - name: Terraform Init (Backend Disabled)
+        uses: paloitmbb/mss-devops-workflow/actions/terraform-init@main
+        with:
+          working-directory: ${{ inputs.working-directory }}
+          enable-backend: 'false'
+
+      - name: Security - Scan tfsec
+        id: scan
+        uses: paloitmbb/mss-devops-workflow/actions/security-scan-tfsec@main
+        with:
+          enabled: ${{ inputs.enable-tfsec }}
+          working-directory: ${{ inputs.working-directory }}
+          severity: ${{ inputs.tfsec-severity }}
+          environment: ${{ inputs.environment }}
+          var-file: ${{ inputs.terraform-var-file }}
+          continue-on-error: ${{ inputs.tfsec-continue-on-error }}
+
+      - name: Rename SARIF File
+        id: rename
+        if: always()
+        uses: paloitmbb/mss-devops-workflow/actions/security-generate-sarifname@main
+        with:
+          scanner-name: 'tfsec'
+          source-file: 'tfsec-results.sarif'
+          environment: ${{ inputs.environment }}
+
+      - name: Azure - Login OIDC
+        if: always() && inputs.sarif-storage-account-name != ''
+        uses: paloitmbb/mss-devops-workflow/actions/azure-login-oidc@main
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Upload SARIF to Azure Storage
+        if: always() && inputs.sarif-storage-account-name != ''
+        uses: paloitmbb/mss-devops-workflow/actions/azure-upload-artifact@main
+        with:
+          storage-account-name: ${{ inputs.sarif-storage-account-name }}
+          container-name: ${{ inputs.sarif-storage-container-name }}
+          source-path: ${{ steps.rename.outputs.renamed-file }}
+          destination-path: ${{ inputs.sarif-storage-destination-path }}
+          content-type: 'application/sarif+json'
+          overwrite: 'true'
+
+  # ============================================================================
+  # Job 3: Trivy Security Scan
+  # ============================================================================
+  trivy-scan:
+    name: 🔒 Security Scan - Trivy
+    runs-on: ${{ inputs.security-runner-os || inputs.runner-os }}
+    timeout-minutes: 15
+    if: inputs.enable-trivy == true
+    continue-on-error: ${{ inputs.trivy-continue-on-error }}
+    permissions:
+      id-token: write      # Required for Azure OIDC authentication
+      contents: read
+      security-events: write
+      actions: read        # Required for SARIF upload telemetry
+    outputs:
+      outcome: ${{ steps.scan.outputs.outcome }}
+
+    steps:
+      - name: Terraform Setup
+        uses: paloitmbb/mss-devops-workflow/actions/terraform-setup@main
+        with:
+          terraform-version: ${{ inputs.terraform-version }}
+
+      - name: Terraform Init (Backend Disabled)
+        uses: paloitmbb/mss-devops-workflow/actions/terraform-init@main
+        with:
+          working-directory: ${{ inputs.working-directory }}
+          enable-backend: 'false'
+
+      - name: Trivy Security Scan
+        id: scan
+        uses: paloitmbb/mss-devops-workflow/actions/security-scan-trivy@main
+        with:
+          enabled: ${{ inputs.enable-trivy }}
+          working-directory: ${{ inputs.working-directory }}
+          severity: ${{ inputs.trivy-severity }}
+          environment: ${{ inputs.environment }}
+          continue-on-error: ${{ inputs.trivy-continue-on-error }}
+
+      - name: Rename SARIF File
+        id: rename
+        if: always()
+        uses: paloitmbb/mss-devops-workflow/actions/security-generate-sarifname@main
+        with:
+          scanner-name: 'trivy'
+          source-file: 'trivy-results.sarif'
+          environment: ${{ inputs.environment }}
+
+      - name: Azure - Login OIDC
+        if: always() && inputs.sarif-storage-account-name != ''
+        uses: paloitmbb/mss-devops-workflow/actions/azure-login-oidc@main
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Upload SARIF to Azure Storage
+        if: always() && inputs.sarif-storage-account-name != ''
+        uses: paloitmbb/mss-devops-workflow/actions/azure-upload-artifact@main
+        with:
+          storage-account-name: ${{ inputs.sarif-storage-account-name }}
+          container-name: ${{ inputs.sarif-storage-container-name }}
+          source-path: ${{ steps.rename.outputs.renamed-file }}
+          destination-path: ${{ inputs.sarif-storage-destination-path }}
+          content-type: 'application/sarif+json'
+          overwrite: 'true'
+
+  # ============================================================================
+  # Job 4: 📊 Security - Aggregate Results
+  # ============================================================================
+  aggregate-security:
+    name: 📊 Security - Aggregate Results
+    needs: [tfsec-scan, trivy-scan]
+    runs-on: ${{ inputs.security-runner-os || inputs.runner-os }}
+    timeout-minutes: 5
+    continue-on-error: ${{ inputs.aggregate-continue-on-error }}
+    if: always()
+    outputs:
+      all-passed: ${{ steps.aggregate.outputs.all-passed }}
+      tfsec-status: ${{ steps.aggregate.outputs.tfsec-status }}
+      trivy-status: ${{ steps.aggregate.outputs.trivy-status }}
+
+    steps:
+      - name: Aggregate Security Results
+        id: aggregate
+        uses: paloitmbb/mss-devops-workflow/actions/security-aggregate-results@main
+        with:
+          tfsec-enabled: ${{ inputs.enable-tfsec }}
+          tfsec-outcome: ${{ needs.tfsec-scan.outputs.outcome || 'skipped' }}
+          trivy-enabled: ${{ inputs.enable-trivy }}
+          trivy-outcome: ${{ needs.trivy-scan.outputs.outcome || 'skipped' }}
+
+      - name: Security Results Summary
+        shell: bash
+        run: |
+          echo "## 🔒 Security Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Scanner | Status | Severity Threshold |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|--------|-------------------|" >> $GITHUB_STEP_SUMMARY
+          echo "| tfsec | ${{ steps.aggregate.outputs.tfsec-status }} | ${{ inputs.tfsec-severity }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Trivy | ${{ steps.aggregate.outputs.trivy-status }} | ${{ inputs.trivy-severity }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Overall Result:** ${{ steps.aggregate.outputs.all-passed == 'true' && '✅ PASSED' || '❌ FAILED' }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Fail if security scans failed
+        if: steps.aggregate.outputs.all-passed == 'false'
+        shell: bash
+        run: |
+          echo "::error::Security scans failed - see summary above"
+          exit 1
+
+  # ============================================================================
+  # Job 5: Terraform Plan
+  # ============================================================================
+  plan:
+    name: Generate Terraform Plan (${{ inputs.environment }})
+    needs: [validate, aggregate-security]
+    if: always() && needs.validate.result == 'success'
+    runs-on: ${{ inputs.plan-runner-os || inputs.runner-os }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    outputs:
+      artifact-name: ${{ steps.plan.outputs.artifact-name }}
+      exitcode: ${{ steps.plan.outputs.exitcode }}
+      plan-hash: ${{ steps.plan.outputs.plan-hash }}
+
+    steps:
+      - name: Terraform Setup
+        id: setup-tf
+        uses: paloitmbb/mss-devops-workflow/actions/terraform-setup@main
+        with:
+          terraform-version: ${{ inputs.terraform-version }}
+
+      - name: Azure - Login OIDC
+        uses: paloitmbb/mss-devops-workflow/actions/azure-login-oidc@main
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Terraform Init (Azure Backend)
+        uses: paloitmbb/mss-devops-workflow/actions/terraform-init@main
+        with:
+          working-directory: ${{ inputs.working-directory }}
+          enable-backend: 'true'
+          backend-config-file: ${{ inputs.backend-config-file }}
+          backend-config: ${{ inputs.backend-config }}
+
+      - name: Generate Terraform Plan
+        id: plan
+        uses: paloitmbb/mss-devops-workflow/actions/terraform-plan@main
+        with:
+          working-directory: ${{ inputs.working-directory }}
+          environment: ${{ inputs.environment }}
+          terraform-version: ${{ steps.setup-tf.outputs.terraform-version }}
+          var-file: ${{ inputs.terraform-var-file }}
+          upload-artifacts: 'true'
+          generate-attestation: 'true'
+          generate-metadata: 'true'
+          show-summary: 'true'
+          artifact-retention-days: ${{ inputs.artifact-retention-days }}

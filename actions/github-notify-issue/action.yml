@@ -1,0 +1,284 @@
+# Post structured status comments on GitHub Issues with label management and optional issue closure.
+# This action provides a generic notification mechanism for any workflow that needs to update
+# issues with progress, validation results, success, or failure information.
+#
+# Key features:
+# - Supports 5 status types (success, failure, validation-passed, validation-failed, in-progress)
+# - Builds markdown comment from structured inputs (tables, sections, next steps, errors)
+# - Adds/removes labels automatically
+# - Optionally closes issues with configurable reason
+# - Writes to both issue comment and GitHub step summary
+#
+# Usage Pattern:
+#   - uses: paloitmbb/mss-devops-workflow/actions/github-notify-issue@main
+#     with:
+#       issue-number: ${{ github.event.issue.number }}
+#       status: 'validation-passed'
+#       summary-table: '[{"field": "Repo Name", "value": "my-repo"}]'
+#       next-steps: '- Review PR\n- Merge when ready'
+#       labels-add: 'validation-passed'
+#
+# Security: Uses github.token by default (read:issues, write:issues permissions required)
+
+name: 'GitHub - Notify Issue'
+description: 'Post structured status comments on GitHub Issues with label management, optional issue closure, and workflow summary output'
+
+inputs:
+  issue-number:
+    description: 'GitHub issue number to comment on'
+    required: true
+
+  status:
+    description: 'Status type: success, failure, validation-passed, validation-failed, in-progress'
+    required: true
+
+  title:
+    description: 'Custom title for the comment (overrides default status title)'
+    required: false
+    default: ''
+
+  summary-table:
+    description: 'JSON array of field/value objects for summary table: [{"field": "...", "value": "..."}]'
+    required: false
+    default: '[]'
+
+  details-sections:
+    description: 'JSON array of heading/body objects for detail sections: [{"heading": "...", "body": "..."}]'
+    required: false
+    default: '[]'
+
+  next-steps:
+    description: 'Markdown list of next steps (appended for success/validation-passed statuses)'
+    required: false
+    default: ''
+
+  error-details:
+    description: 'Markdown error description (appended for failure/validation-failed statuses)'
+    required: false
+    default: ''
+
+  labels-add:
+    description: 'Comma-separated list of labels to add to the issue'
+    required: false
+    default: ''
+
+  labels-remove:
+    description: 'Comma-separated list of labels to remove from the issue (errors silently ignored)'
+    required: false
+    default: ''
+
+  close-issue:
+    description: 'Set to "true" to close the issue after commenting'
+    required: false
+    default: 'false'
+
+  close-reason:
+    description: 'Reason for closing: completed or not_planned'
+    required: false
+    default: 'completed'
+
+  write-summary:
+    description: 'Set to "true" to also write comment to $GITHUB_STEP_SUMMARY'
+    required: false
+    default: 'true'
+
+  github-token:
+    description: 'GitHub token for API operations (defaults to github.token)'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  comment-id:
+    description: 'ID of the created comment'
+    value: ${{ steps.notify.outputs.comment-id }}
+
+  comment-url:
+    description: 'URL of the created comment'
+    value: ${{ steps.notify.outputs.comment-url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Post status notification to issue
+      id: notify
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v7.0.1
+      env:
+        CUSTOM_TITLE: ${{ inputs.title }}
+        SUMMARY_TABLE_JSON: ${{ inputs.summary-table }}
+        DETAILS_SECTIONS_JSON: ${{ inputs.details-sections }}
+        NEXT_STEPS: ${{ inputs.next-steps }}
+        ERROR_DETAILS: ${{ inputs.error-details }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const issueNumber = parseInt('${{ inputs.issue-number }}');
+          const status = '${{ inputs.status }}';
+          const customTitle = process.env.CUSTOM_TITLE;
+          const summaryTableJson = process.env.SUMMARY_TABLE_JSON || '[]';
+          const detailsSectionsJson = process.env.DETAILS_SECTIONS_JSON || '[]';
+          const nextSteps = process.env.NEXT_STEPS || '';
+          const errorDetails = process.env.ERROR_DETAILS || '';
+          const labelsAdd = '${{ inputs.labels-add }}';
+          const labelsRemove = '${{ inputs.labels-remove }}';
+          const closeIssue = '${{ inputs.close-issue }}' === 'true';
+          const closeReason = '${{ inputs.close-reason }}';
+          const writeSummary = '${{ inputs.write-summary }}' === 'true';
+
+          console.log('::group::Build Status Notification');
+          console.log(`Status: ${status}`);
+          console.log(`Issue: #${issueNumber}`);
+          console.log(`Details sections JSON length: ${detailsSectionsJson.length}`);
+          console.log(`Summary table JSON length: ${summaryTableJson.length}`);
+
+          // Status icon and default title mapping
+          const statusMap = {
+            'success': { icon: '✅', title: 'Success' },
+            'failure': { icon: '❌', title: 'Failed' },
+            'validation-passed': { icon: '✅ 🔍', title: 'Validation Passed' },
+            'validation-failed': { icon: '❌ 🔍', title: 'Validation Failed' },
+            'in-progress': { icon: '⏳', title: 'In Progress' }
+          };
+
+          const statusInfo = statusMap[status] || { icon: 'ℹ️', title: 'Update' };
+          const finalTitle = customTitle || statusInfo.title;
+
+          // Start building comment body
+          let commentBody = `## ${statusInfo.icon} ${finalTitle}\n\n`;
+
+          // Add summary table if provided
+          if (summaryTableJson !== '[]') {
+            try {
+              const summaryTable = JSON.parse(summaryTableJson);
+              if (summaryTable.length > 0) {
+                commentBody += '| Field | Value |\n';
+                commentBody += '|-------|-------|\n';
+                for (const row of summaryTable) {
+                  commentBody += `| **${row.field}** | ${row.value} |\n`;
+                }
+                commentBody += '\n';
+              }
+            } catch (e) {
+              console.log(`Warning: Failed to parse summary-table JSON: ${e.message}`);
+            }
+          }
+
+          // Add detail sections if provided
+          if (detailsSectionsJson !== '[]') {
+            try {
+              console.log('Parsing details-sections JSON...');
+              const detailsSections = JSON.parse(detailsSectionsJson);
+              console.log(`Parsed ${detailsSections.length} detail sections`);
+              for (const section of detailsSections) {
+                commentBody += `### ${section.heading}\n\n`;
+                commentBody += `${section.body}\n\n`;
+              }
+            } catch (e) {
+              console.log(`Warning: Failed to parse details-sections JSON: ${e.message}`);
+              console.log(`JSON value: ${detailsSectionsJson.substring(0, 200)}...`);
+            }
+          } else {
+            console.log('No details-sections provided (empty array)');
+          }
+
+          // Add next steps for success/validation-passed
+          if ((status === 'success' || status === 'validation-passed') && nextSteps) {
+            commentBody += '### 📋 Next Steps\n\n';
+            commentBody += `${nextSteps}\n\n`;
+          }
+
+          // Add error details for failure/validation-failed
+          if ((status === 'failure' || status === 'validation-failed') && errorDetails) {
+            commentBody += '### ⚠️ Error Details\n\n';
+            commentBody += `${errorDetails}\n\n`;
+          }
+
+          commentBody += '---\n';
+          commentBody += '*Automated by GitHub Actions workflow*\n';
+
+          console.log('Comment body prepared');
+          console.log('::endgroup::');
+
+          // Post comment
+          console.log('::group::Post Comment to Issue');
+          const comment = await github.rest.issues.createComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: issueNumber,
+            body: commentBody
+          });
+
+          console.log(`✅ Comment created: ${comment.data.html_url}`);
+          core.setOutput('comment-id', comment.data.id.toString());
+          core.setOutput('comment-url', comment.data.html_url);
+          console.log('::endgroup::');
+
+          // Add labels
+          if (labelsAdd) {
+            console.log('::group::Add Labels');
+            const labelsToAdd = labelsAdd.split(',').map(l => l.trim()).filter(l => l);
+            if (labelsToAdd.length > 0) {
+              try {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  labels: labelsToAdd
+                });
+                console.log(`✅ Added labels: ${labelsToAdd.join(', ')}`);
+              } catch (e) {
+                console.log(`⚠️  Failed to add labels: ${e.message}`);
+              }
+            }
+            console.log('::endgroup::');
+          }
+
+          // Remove labels
+          if (labelsRemove) {
+            console.log('::group::Remove Labels');
+            const labelsToRemove = labelsRemove.split(',').map(l => l.trim()).filter(l => l);
+            for (const label of labelsToRemove) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  name: label
+                });
+                console.log(`✅ Removed label: ${label}`);
+              } catch (e) {
+                // Silently ignore errors (label might not exist)
+                console.log(`ℹ️  Could not remove label "${label}": ${e.message}`);
+              }
+            }
+            console.log('::endgroup::');
+          }
+
+          // Close issue if requested
+          if (closeIssue) {
+            console.log('::group::Close Issue');
+            try {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                state: 'closed',
+                state_reason: closeReason
+              });
+              console.log(`✅ Issue #${issueNumber} closed with reason: ${closeReason}`);
+            } catch (e) {
+              console.log(`⚠️  Failed to close issue: ${e.message}`);
+            }
+            console.log('::endgroup::');
+          }
+
+          // Write to step summary if requested
+          if (writeSummary) {
+            console.log('::group::Write to Step Summary');
+            await core.summary
+              .addRaw(commentBody)
+              .write();
+            console.log('✅ Written to $GITHUB_STEP_SUMMARY');
+            console.log('::endgroup::');
+          }
+
+          console.log(`✅ Notification complete for issue #${issueNumber}`);

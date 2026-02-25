@@ -1,0 +1,177 @@
+# Parse structured GitHub Issue form bodies into typed outputs using regex field extraction.
+# This action provides a generic parser for any structured issue form, mapping form field
+# labels to output variables. Handles fallback values and special cases like "_No response_".
+#
+# Key features:
+# - Generic field mapping via JSON configuration (not hardcoded to specific issue types)
+# - Fallback value support for empty or missing fields
+# - Handles "Others (specify below)" pattern by reading alternative fields
+# - Outputs both individual fields and combined JSON object
+#
+# Usage Pattern:
+#   - uses: paloitmbb/mss-devops-workflow/actions/github-parse-issueform@main
+#     with:
+#       issue-body: ${{ github.event.issue.body }}
+#       field-mapping: '{"repo-name": "Repository Name", "tech-stack": "Tech Stack"}'
+#       fallback-values: '{"default-branch": "main"}'
+#
+# Security: No secrets required - parses public issue content only
+
+name: 'GitHub - Parse Issue Form'
+description: 'Parse structured GitHub Issue form bodies into typed outputs using regex field extraction'
+
+inputs:
+  issue-body:
+    description: 'Raw GitHub issue body text to parse'
+    required: true
+
+  field-mapping:
+    description: 'JSON object mapping output-key to issue form field label (e.g., {"repo-name": "Repository Name", "tech-stack": "Tech Stack"})'
+    required: true
+
+  fallback-values:
+    description: 'JSON object with default values for fields that resolve to empty or "_No response_" (e.g., {"default-branch": "main"})'
+    required: false
+    default: '{}'
+
+outputs:
+  parsed-fields:
+    description: 'Combined JSON object of all extracted and processed fields'
+    value: ${{ steps.parse.outputs.parsed-fields }}
+
+  repo-name:
+    description: 'Repository name extracted from issue form'
+    value: ${{ steps.parse.outputs.repo-name }}
+
+  tech-stack:
+    description: 'Tech stack extracted from issue form'
+    value: ${{ steps.parse.outputs.tech-stack }}
+
+  tech-stack-other:
+    description: 'Other tech stack extracted from issue form'
+    value: ${{ steps.parse.outputs.tech-stack-other }}
+
+  justification:
+    description: 'Business justification extracted from issue form'
+    value: ${{ steps.parse.outputs.justification }}
+
+  teams:
+    description: 'Teams extracted from issue form'
+    value: ${{ steps.parse.outputs.teams }}
+
+  default-branch:
+    description: 'Default branch extracted from issue form'
+    value: ${{ steps.parse.outputs.default-branch }}
+
+runs:
+  using: composite
+  steps:
+    - name: GitHub - Parse Issue Form fields
+      id: parse
+      shell: bash
+      run: |
+        echo "::group::GitHub - Parse Issue Form Fields"
+
+        # Read inputs
+        ISSUE_BODY='${{ inputs.issue-body }}'
+        FIELD_MAPPING='${{ inputs.field-mapping }}'
+        FALLBACK_VALUES='${{ inputs.fallback-values }}'
+
+        # Initialize combined JSON object
+        PARSED_JSON='{}'
+
+        # Function to extract field value using regex
+        extract_field() {
+          local body="$1"
+          local label="$2"
+
+          # Regex pattern: ### <FieldLabel>\s*\n\s*([^\n#]+)
+          # Extract content after "### FieldLabel" until next ### or end
+          local section=$(echo "$body" | sed -n "/### ${label}/,/###/p")
+          section=$(echo "$section" | sed '1d')
+          # Remove trailing heading marker if present
+          section=$(echo "$section" | sed '$ {/^### /d;}')
+          # Trim Windows carriage returns and capture first non-empty line
+          local value=$(echo "$section" | tr -d '\r' | awk 'NF {print; exit}')
+          value=$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+          # Handle _No response_ as empty
+          if [[ "$value" == "_No response_" ]]; then
+            value=""
+          fi
+
+          echo "$value"
+        }
+
+        # Get all keys from field-mapping
+        KEYS=$(echo "$FIELD_MAPPING" | jq -r 'keys[]')
+        FIELD_COUNT=$(echo "$FIELD_MAPPING" | jq 'keys | length')
+
+        # Iterate over each field mapping entry
+        while IFS= read -r key; do
+          # Get the field label for this key
+          LABEL=$(echo "$FIELD_MAPPING" | jq -r --arg k "$key" '.[$k]')
+
+          echo "Extracting field: $key (label: $LABEL)"
+
+          # Extract the value
+          VALUE=$(extract_field "$ISSUE_BODY" "$LABEL")
+
+          # Check if we need fallback from another field
+          # Special case: "Others (specify below)" pattern
+          if [[ "$VALUE" == "Others (specify below)" ]]; then
+            # Check if there's a fallback field specified that starts with "$"
+            FALLBACK_KEY=$(echo "$FALLBACK_VALUES" | jq -r --arg k "$key" '.[$k] // empty')
+
+            if [[ "$FALLBACK_KEY" =~ ^\$\{.*\}$ ]]; then
+              # Extract the field name from ${field-name} format
+              FALLBACK_FIELD=$(echo "$FALLBACK_KEY" | sed 's/\${\(.*\)}/\1/')
+
+              # Get the label for the fallback field
+              FALLBACK_LABEL=$(echo "$FIELD_MAPPING" | jq -r --arg k "$FALLBACK_FIELD" '.[$k] // empty')
+
+              if [[ -n "$FALLBACK_LABEL" ]]; then
+                VALUE=$(extract_field "$ISSUE_BODY" "$FALLBACK_LABEL")
+                echo "  → Using fallback from field: $FALLBACK_FIELD (value: $VALUE)"
+              fi
+            fi
+          fi
+
+          # Apply static fallback if value is still empty
+          if [[ -z "$VALUE" ]]; then
+            STATIC_FALLBACK=$(echo "$FALLBACK_VALUES" | jq -r --arg k "$key" '.[$k] // empty')
+
+            # Only use if it's not a variable reference
+            if [[ -n "$STATIC_FALLBACK" ]] && [[ ! "$STATIC_FALLBACK" =~ ^\$ ]]; then
+              VALUE="$STATIC_FALLBACK"
+              echo "  → Using static fallback: $VALUE"
+            fi
+          fi
+
+          echo "  Final value: $VALUE"
+
+          # Set individual output for this field
+          # Emit outputs safely even when values contain newlines
+          if [[ "$VALUE" == *$'\n'* ]]; then
+            DELIM="__PARSE_FIELD_${RANDOM}__"
+            {
+              echo "$key<<$DELIM"
+              echo "$VALUE"
+              echo "$DELIM"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "$key=$VALUE" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Add to combined JSON object
+          PARSED_JSON=$(echo "$PARSED_JSON" | jq --arg k "$key" --arg v "$VALUE" '.[$k] = $v')
+
+        done <<< "$KEYS"
+
+        # Output combined JSON
+        PARSED_JSON_MINIFIED=$(echo "$PARSED_JSON" | jq -c '.')
+        echo "parsed-fields=$PARSED_JSON_MINIFIED" >> "$GITHUB_OUTPUT"
+
+        echo ""
+        echo "✅ Successfully parsed ${FIELD_COUNT} fields from issue form"
+        echo "::endgroup::"

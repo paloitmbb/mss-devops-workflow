@@ -1,0 +1,238 @@
+# Create a branch, commit configuration file changes, push, and open a pull request.
+# This action provides a generic PR creation workflow for any configuration changes,
+# not limited to repository requests.
+#
+# Key features:
+# - Configures git identity for commits
+# - Creates new branch with automatic remote branch cleanup
+# - Stages specified files and commits with conventional commit format
+# - Pushes to remote and creates PR via GitHub API
+# - Adds labels and links to issues automatically
+# - Supports multi-line commit bodies and PR descriptions
+#
+# Usage Pattern:
+#   - uses: paloitmbb/mss-devops-workflow/actions/github-create-pullrequest@main
+#     with:
+#       branch-prefix: 'repo-request'
+#       branch-suffix: 'my-repo'
+#       file-paths: 'data/repositories.yaml'
+#       commit-title: 'feat: ✨ add repository my-repo'
+#       pr-title: 'Add repository: my-repo'
+#       pr-body: 'Full PR description...'
+#       pr-labels: 'repo-request,automated'
+#       linked-issue: '123'
+#
+# Security: Requires github-token with contents:write and pull-requests:write permissions
+
+name: 'GitHub - Create Pull Request'
+description: 'Create a branch, commit configuration file changes, push, and open a pull request with labels and optional issue linking'
+
+inputs:
+  branch-prefix:
+    description: 'Branch name prefix (e.g., "repo-request", "team-update")'
+    required: true
+
+  branch-suffix:
+    description: 'Branch name suffix - typically the entity name (e.g., repository name, team slug)'
+    required: true
+
+  file-paths:
+    description: 'Space-separated list of files to stage and commit (e.g., "data/repositories.yaml data/teams.yaml")'
+    required: true
+
+  commit-title:
+    description: 'Conventional commit subject line (e.g., "feat: ✨ add repository my-repo")'
+    required: true
+
+  commit-body:
+    description: 'Multi-line commit body with additional context (optional)'
+    required: false
+    default: ''
+
+  pr-title:
+    description: 'Pull request title'
+    required: true
+
+  pr-body:
+    description: 'Pull request description in markdown format'
+    required: true
+
+  pr-labels:
+    description: 'Comma-separated list of labels to add to the pull request'
+    required: false
+    default: ''
+
+  linked-issue:
+    description: 'Issue number to link via "Closes #N" (appended to PR body)'
+    required: false
+    default: ''
+
+  base-branch:
+    description: 'Target branch for the pull request'
+    required: false
+    default: 'main'
+
+  git-user-name:
+    description: 'Git user name for commits'
+    required: false
+    default: 'github-actions[bot]'
+
+  git-user-email:
+    description: 'Git user email for commits'
+    required: false
+    default: 'github-actions[bot]@users.noreply.github.com'
+
+  github-token:
+    description: 'GitHub token for PR creation (requires contents:write, pull-requests:write)'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  branch-name:
+    description: 'Full branch name that was created'
+    value: ${{ steps.create-branch.outputs.branch-name }}
+
+  pr-number:
+    description: 'Pull request number'
+    value: ${{ steps.create-pr.outputs.pr-number }}
+
+  pr-url:
+    description: 'Pull request HTML URL'
+    value: ${{ steps.create-pr.outputs.pr-url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Configure Git identity
+      id: git-setup
+      shell: bash
+      run: |
+        echo "::group::Configure Git Identity"
+
+        git config user.name "${{ inputs.git-user-name }}"
+        git config user.email "${{ inputs.git-user-email }}"
+
+        echo "✅ Git configured as: ${{ inputs.git-user-name }} <${{ inputs.git-user-email }}>"
+        echo "::endgroup::"
+
+    - name: Create branch and commit changes
+      id: create-branch
+      shell: bash
+      run: |
+        echo "::group::Create Branch and Commit"
+
+        BRANCH_NAME="${{ inputs.branch-prefix }}/${{ inputs.branch-suffix }}"
+
+        echo "Branch name: $BRANCH_NAME"
+        echo "Files to stage: ${{ inputs.file-paths }}"
+
+        # Delete remote branch if it exists (ignore errors)
+        echo "Cleaning up existing remote branch (if any)..."
+        git push origin --delete "${BRANCH_NAME}" 2>/dev/null || true
+
+        # Create and checkout new branch
+        git checkout -b "${BRANCH_NAME}"
+        echo "✅ Created branch: $BRANCH_NAME"
+
+        # Stage files
+        git add ${{ inputs.file-paths }}
+        echo "✅ Staged files: ${{ inputs.file-paths }}"
+
+        # Build commit message
+        COMMIT_MSG="${{ inputs.commit-title }}"
+
+        if [ -n "${{ inputs.commit-body }}" ]; then
+          # Append body with blank line separator
+          COMMIT_MSG="${COMMIT_MSG}"$'\n\n'"${{ inputs.commit-body }}"
+        fi
+
+        # Commit changes
+        git commit -m "$COMMIT_MSG"
+        echo "✅ Committed changes"
+
+        # Push to remote
+        git push origin "${BRANCH_NAME}"
+        echo "✅ Pushed to remote: ${BRANCH_NAME}"
+
+        # Set output
+        echo "branch-name=${BRANCH_NAME}" >> $GITHUB_OUTPUT
+
+        echo "::endgroup::"
+
+    - name: Create Pull Request
+      id: create-pr
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v7.0.1
+      env:
+        PR_TITLE: ${{ inputs.pr-title }}
+        PR_BODY: ${{ inputs.pr-body }}
+        LINKED_ISSUE: ${{ inputs.linked-issue }}
+        BASE_BRANCH: ${{ inputs.base-branch }}
+        PR_LABELS: ${{ inputs.pr-labels }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const branchName = '${{ steps.create-branch.outputs.branch-name }}';
+          const prTitle = process.env.PR_TITLE;
+          let prBody = process.env.PR_BODY;
+          const linkedIssue = process.env.LINKED_ISSUE;
+          const baseBranch = process.env.BASE_BRANCH;
+          const labelsInput = process.env.PR_LABELS;
+
+          console.log('::group::Create Pull Request');
+          console.log(`Title: ${prTitle}`);
+          console.log(`Branch: ${branchName} → ${baseBranch}`);
+
+          // Append "Closes #N" if issue is linked
+          if (linkedIssue) {
+            prBody += `\n\n---\n\nCloses #${linkedIssue}`;
+            console.log(`Linked issue: #${linkedIssue}`);
+          }
+
+          // Create PR
+          const pr = await github.rest.pulls.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: prTitle,
+            head: branchName,
+            base: baseBranch,
+            body: prBody
+          });
+
+          console.log(`✅ Pull request created: #${pr.data.number}`);
+          console.log(`URL: ${pr.data.html_url}`);
+
+          // Set outputs
+          core.setOutput('pr-number', pr.data.number.toString());
+          core.setOutput('pr-url', pr.data.html_url);
+
+          // Add labels if specified
+          if (labelsInput) {
+            console.log('Adding labels...');
+            const labels = labelsInput.split(',').map(l => l.trim()).filter(l => l);
+            if (labels.length > 0) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.data.number,
+                labels: labels
+              });
+              console.log(`✅ Added labels: ${labels.join(', ')}`);
+            }
+          }
+
+          console.log('::endgroup::');
+
+          return pr.data;
+
+    - name: Output summary
+      id: summary
+      shell: bash
+      run: |
+        echo "::group::Pull Request Created"
+        echo "Branch: ${{ steps.create-branch.outputs.branch-name }}"
+        echo "PR Number: ${{ steps.create-pr.outputs.pr-number }}"
+        echo "PR URL: ${{ steps.create-pr.outputs.pr-url }}"
+        if [ -n "${{ inputs.linked-issue }}" ]; then
+          echo "Linked Issue: #${{ inputs.linked-issue }}"
+        fi
+        echo "::endgroup::"

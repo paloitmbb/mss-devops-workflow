@@ -1,0 +1,184 @@
+name: 'GitHub - Comment Plan on PR'
+description: 'Post Terraform plan output as a comment on the pull request'
+
+inputs:
+  working-directory:
+    description: 'Directory containing plan-output.txt (or working directory)'
+    required: true
+  environment:
+    description: 'Target environment'
+    required: true
+  terraform-version:
+    description: 'Terraform version used'
+    required: true
+  plan-hash:
+    description: 'SHA256 hash of the plan (optional - only if generated)'
+    required: false
+    default: ''
+  plan-exitcode:
+    description: 'Terraform plan exit code'
+    required: true
+  plan-summary:
+    description: 'Plan summary text (fallback if plan-output.txt not available)'
+    required: false
+    default: ''
+  github-token:
+    description: 'GitHub token for API access'
+    required: true
+  # Validation statuses
+  fmt-status:
+    description: 'Terraform fmt validation status'
+    required: false
+    default: ''
+  validate-status:
+    description: 'Terraform validate status'
+    required: false
+    default: ''
+  tflint-status:
+    description: 'tflint validation status'
+    required: false
+    default: ''
+  # Security scan statuses
+  tfsec-status:
+    description: 'tfsec scan status (success, failure, or skipped)'
+    required: false
+    default: 'skipped'
+  tfsec-severity:
+    description: 'tfsec severity threshold'
+    required: false
+    default: ''
+  trivy-status:
+    description: 'Trivy scan status (success, failure, or skipped)'
+    required: false
+    default: 'skipped'
+  trivy-severity:
+    description: 'Trivy severity threshold'
+    required: false
+    default: ''
+  security-passed:
+    description: 'Overall security scan result (true/false)'
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: GitHub - Comment Plan on PR
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const fs = require('fs');
+
+          // Try to read plan-output.txt, fall back to plan-summary input
+          let planOutput = '';
+          const planFile = '${{ inputs.working-directory }}/plan-output.txt';
+
+          try {
+            if (fs.existsSync(planFile)) {
+              planOutput = fs.readFileSync(planFile, 'utf8');
+              console.log('✅ Read plan from plan-output.txt');
+            } else {
+              // Use plan-summary as fallback
+              planOutput = '${{ inputs.plan-summary }}' || 'Plan output not available';
+              console.log('📋 Using plan-summary (plan-output.txt not found)');
+            }
+          } catch (error) {
+            planOutput = '${{ inputs.plan-summary }}' || 'Plan output not available';
+            console.log('⚠️ Failed to read plan-output.txt, using plan-summary');
+          }
+
+          // Truncate if too long (GitHub comment limit)
+          const maxLength = 65000;
+          const truncatedPlan = planOutput.length > maxLength
+            ? planOutput.substring(0, maxLength) + '\n\n...(truncated)'
+            : planOutput;
+
+          // Helper functions
+          const getStatusEmoji = (status) => {
+            if (status === 'success') return '✅';
+            if (status === 'failure') return '❌';
+            return '⏭️';
+          };
+
+          const getStatusText = (status) => {
+            if (status === 'success') return 'Passed';
+            if (status === 'failure') return 'Failed';
+            return 'Skipped';
+          };
+
+          // Build validation results section
+          const fmtStatus = '${{ inputs.fmt-status }}';
+          const validateStatus = '${{ inputs.validate-status }}';
+          const tflintStatus = '${{ inputs.tflint-status }}';
+
+          let validationSection = '';
+          if (fmtStatus || validateStatus || tflintStatus) {
+            const validationRows = [];
+            if (fmtStatus) validationRows.push(`| **Format (fmt)** | ${getStatusEmoji(fmtStatus)} ${getStatusText(fmtStatus)} |`);
+            if (validateStatus) validationRows.push(`| **Syntax (validate)** | ${getStatusEmoji(validateStatus)} ${getStatusText(validateStatus)} |`);
+            if (tflintStatus && tflintStatus !== 'skipped') validationRows.push(`| **Code Quality (tflint)** | ${getStatusEmoji(tflintStatus)} ${getStatusText(tflintStatus)} |`);
+
+            if (validationRows.length > 0) {
+              validationSection = '\n\n### ✅ Validation Results\n\n| Check | Status |\n|-------|--------|\n' + validationRows.join('\n');
+            }
+          }
+
+          // Build security scan results table
+          const tfsecStatus = '${{ inputs.tfsec-status }}';
+          const tfsecSeverity = '${{ inputs.tfsec-severity }}';
+          const trivyStatus = '${{ inputs.trivy-status }}';
+          const trivySeverity = '${{ inputs.trivy-severity }}';
+          const securityPassed = '${{ inputs.security-passed }}';
+
+          let securitySection = '';
+          const enabledScanners = [];
+
+          if (tfsecStatus !== 'skipped') {
+            enabledScanners.push(`| tfsec | ${getStatusEmoji(tfsecStatus)} ${getStatusText(tfsecStatus)} | \`${tfsecSeverity}\` |`);
+          }
+          if (trivyStatus !== 'skipped') {
+            enabledScanners.push(`| Trivy | ${getStatusEmoji(trivyStatus)} ${getStatusText(trivyStatus)} | \`${trivySeverity}\` |`);
+          }
+
+          if (enabledScanners.length > 0) {
+            const overallResult = securityPassed === 'true' ? '✅ PASSED' : '❌ FAILED';
+            securitySection = '\n\n### 🔒 Security Scan Results\n\n| Scanner | Status | Severity Threshold |\n|---------|--------|--------------------|' +
+              '\n' + enabledScanners.join('\n') + '\n\n**Overall Result:** ' + overallResult;
+          }
+
+          // Build plan hash line (only if provided)
+          const planHash = '${{ inputs.plan-hash }}';
+          const planHashLine = planHash ? `\n**Plan Hash**: \`${planHash}\`` : '';
+
+          const output = [
+            '#### Terraform Plan Results 📋',
+            '',
+            `**Environment**: \`${{ inputs.environment }}\``,
+            `**Working Directory**: \`${{ inputs.working-directory }}\``,
+            `**Terraform Version**: \`${{ inputs.terraform-version }}\`` + planHashLine,
+            validationSection,
+            securitySection,
+            '',
+            '<details>',
+            '<summary>Show Terraform Plan</summary>',
+            '',
+            '```terraform',
+            truncatedPlan,
+            '```',
+            '',
+            '</details>',
+            '',
+            `**Exit Code**: ${{ inputs.plan-exitcode }} (${{ inputs.plan-exitcode == '0' && 'No changes' || inputs.plan-exitcode == '2' && 'Changes detected' || 'Error' }})`,
+            '',
+            `*Workflow*: [\`${process.env.GITHUB_WORKFLOW}\`](${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID})`,
+            `*Commit*: ${process.env.GITHUB_SHA}`
+          ].join('\n');
+
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: output
+          });

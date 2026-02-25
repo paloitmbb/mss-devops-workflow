@@ -1,0 +1,289 @@
+# Validate repository name format, team existence in GitHub organization, and repository uniqueness.
+# This action performs three validation checks and consolidates results into a pass/fail decision.
+#
+# Validation checks performed:
+# 1. Repository Name: Validates against regex pattern (default: lowercase + hyphens only)
+# 2. Team Existence: Verifies all specified teams exist in the GitHub organization
+# 3. Repository Uniqueness: Ensures repository name is not already taken
+#
+# Key features:
+# - Configurable name pattern for different naming conventions
+# - Optional team validation (empty teams list is valid)
+# - Lists available teams on validation failure for debugging
+# - Provides both individual check results and consolidated pass/fail
+# - Generates markdown summary table for PR/issue comments
+#
+# Usage Pattern:
+#   - uses: paloitmbb/mss-devops-workflow/actions/github-validate-request@main
+#     with:
+#       repository-name: 'my-new-repo'
+#       teams: 'platform-team,devops-team'
+#       organization: 'my-org'
+#       github-token: ${{ secrets.GITHUB_TOKEN }}
+#
+# Security: Requires GitHub token with 'read:org' scope for team validation
+
+name: 'GitHub - Validate Repository Request'
+description: 'Validate repository name format, team existence in GitHub organization, and repository uniqueness'
+
+inputs:
+  repository-name:
+    description: 'Repository name to validate'
+    required: true
+
+  teams:
+    description: 'Comma-separated list of team slugs to validate (empty string if no teams)'
+    required: false
+    default: ''
+
+  organization:
+    description: 'GitHub organization name'
+    required: true
+
+  github-token:
+    description: 'GitHub token with read:org scope for team validation and repo checks'
+    required: true
+
+  name-pattern:
+    description: 'Regex pattern for repository name validation (default: lowercase with hyphens)'
+    required: false
+    default: '^[a-z0-9-]+$'
+
+outputs:
+  validation-passed:
+    description: 'Overall validation result (true/false string)'
+    value: ${{ steps.consolidate.outputs.validation-passed }}
+
+  name-valid:
+    description: 'Repository name validation result (true/false)'
+    value: ${{ steps.validate-name.outputs.name-valid }}
+
+  name-error:
+    description: 'Repository name validation error message (empty if valid)'
+    value: ${{ steps.validate-name.outputs.name-error }}
+
+  teams-valid:
+    description: 'Team validation result (true/false)'
+    value: ${{ steps.validate-teams.outputs.teams-valid }}
+
+  teams-error:
+    description: 'Team validation error message (empty if valid)'
+    value: ${{ steps.validate-teams.outputs.teams-error }}
+
+  validated-teams:
+    description: 'JSON array of confirmed team slugs'
+    value: ${{ steps.validate-teams.outputs.validated-teams }}
+
+  teams-display:
+    description: 'Human-readable comma-separated list of validated teams'
+    value: ${{ steps.validate-teams.outputs.teams-display }}
+
+  repository-exists:
+    description: 'Whether repository already exists (true/false)'
+    value: ${{ steps.check-repo.outputs.repository-exists }}
+
+  repository-error:
+    description: 'Repository existence error message (empty if repo does not exist)'
+    value: ${{ steps.check-repo.outputs.repository-error }}
+
+  validation-summary:
+    description: 'Markdown table summarizing all validation checks'
+    value: ${{ steps.consolidate.outputs.validation-summary }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate repository name
+      id: validate-name
+      shell: bash
+      run: |
+        echo "::group::Validate Repository Name"
+
+        REPO_NAME="${{ inputs.repository-name }}"
+        NAME_PATTERN="${{ inputs.name-pattern }}"
+
+        echo "Repository name: $REPO_NAME"
+        echo "Pattern: $NAME_PATTERN"
+
+        # Check if repo name matches pattern
+        if [[ ! "$REPO_NAME" =~ $NAME_PATTERN ]]; then
+          echo "❌ Repository name validation failed"
+          echo "name-valid=false" >> $GITHUB_OUTPUT
+          echo "name-error=Repository name must be lowercase with hyphens only (pattern: $NAME_PATTERN)" >> $GITHUB_OUTPUT
+        else
+          echo "✅ Repository name is valid"
+          echo "name-valid=true" >> $GITHUB_OUTPUT
+          echo "name-error=" >> $GITHUB_OUTPUT
+        fi
+
+        echo "::endgroup::"
+
+    - name: Validate team existence
+      id: validate-teams
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v7.0.1
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const teamsString = '${{ inputs.teams }}';
+          const organization = '${{ inputs.organization }}';
+
+          console.log('::group::Validate Team Existence');
+
+          // Filter out empty strings and GitHub's "_No response_" placeholder
+          const teamList = teamsString
+            .split(',')
+            .map(t => t.trim())
+            .filter(t => t && t !== '_No response_');
+
+          console.log(`🔍 Validating teams in organization: ${organization}`);
+          console.log(`📋 Teams to validate: ${teamList.length > 0 ? teamList.join(', ') : 'None (team access is optional)'}`);
+
+          if (teamList.length === 0) {
+            console.log('ℹ️  No teams specified - repository will be created without team access');
+            core.setOutput('teams-valid', 'true');
+            core.setOutput('validated-teams', JSON.stringify([]));
+            core.setOutput('teams-display', 'None');
+            core.setOutput('teams-error', '');
+            console.log('::endgroup::');
+            return;
+          }
+
+          const invalidTeams = [];
+          const validTeams = [];
+
+          // Validate each team exists in organization
+          for (const teamSlug of teamList) {
+            console.log(`Checking team: "${teamSlug}"`);
+            try {
+              const team = await github.rest.teams.getByName({
+                org: organization,
+                team_slug: teamSlug
+              });
+              validTeams.push(teamSlug);
+              console.log(`✅ Team found: ${teamSlug} (ID: ${team.data.id}, Name: ${team.data.name})`);
+            } catch (error) {
+              console.log(`❌ Team not found: ${teamSlug}`);
+              console.log(`   Error: ${error.message}`);
+              console.log(`   Status: ${error.status || 'N/A'}`);
+              invalidTeams.push(teamSlug);
+            }
+          }
+
+          if (invalidTeams.length > 0) {
+            // Try to list available teams to help with debugging
+            try {
+              console.log(`📋 Fetching list of teams from organization: ${organization}`);
+              const { data: orgTeams } = await github.rest.teams.list({
+                org: organization,
+                per_page: 100
+              });
+              console.log(`Found ${orgTeams.length} teams in organization`);
+              const teamSlugs = orgTeams.map(t => `${t.slug} (${t.name})`).join(', ');
+              const errorMsg = `Teams do not exist in organization '${organization}': ${invalidTeams.join(', ')}. Available teams: ${teamSlugs}`;
+              core.setOutput('teams-error', errorMsg);
+            } catch (listError) {
+              console.log(`❌ Failed to list teams: ${listError.message}`);
+              const errorMsg = `Teams do not exist in organization '${organization}': ${invalidTeams.join(', ')}. Unable to list available teams - check GitHub token has 'read:org' permission.`;
+              core.setOutput('teams-error', errorMsg);
+            }
+            core.setOutput('teams-valid', 'false');
+            core.setOutput('validated-teams', JSON.stringify([]));
+            core.setOutput('teams-display', '');
+            console.log('::endgroup::');
+            return;
+          }
+
+          console.log(`✅ All ${validTeams.length} teams validated successfully`);
+          core.setOutput('teams-valid', 'true');
+          core.setOutput('validated-teams', JSON.stringify(validTeams));
+          core.setOutput('teams-display', validTeams.join(', '));
+          core.setOutput('teams-error', '');
+          console.log('::endgroup::');
+
+    - name: Check repository existence
+      id: check-repo
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v7.0.1
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const repoName = '${{ inputs.repository-name }}';
+          const organization = '${{ inputs.organization }}';
+
+          console.log('::group::Check Repository Existence');
+          console.log(`Checking if repository exists: ${organization}/${repoName}`);
+
+          try {
+            await github.rest.repos.get({
+              owner: organization,
+              repo: repoName
+            });
+            console.log(`❌ Repository already exists: ${organization}/${repoName}`);
+            core.setOutput('repository-exists', 'true');
+            core.setOutput('repository-error', `Repository ${repoName} already exists in organization ${organization}`);
+          } catch (error) {
+            if (error.status === 404) {
+              console.log(`✅ Repository name is available: ${organization}/${repoName}`);
+              core.setOutput('repository-exists', 'false');
+              core.setOutput('repository-error', '');
+            } else {
+              console.log(`⚠️  Unexpected error checking repository: ${error.message}`);
+              throw error;
+            }
+          }
+
+          console.log('::endgroup::');
+
+    - name: Consolidate validation results
+      id: consolidate
+      shell: bash
+      run: |
+        echo "::group::Validation Summary"
+
+        NAME_VALID="${{ steps.validate-name.outputs.name-valid }}"
+        TEAMS_VALID="${{ steps.validate-teams.outputs.teams-valid }}"
+        REPO_EXISTS="${{ steps.check-repo.outputs.repository-exists }}"
+
+        echo "Name validation: $NAME_VALID"
+        echo "Teams validation: $TEAMS_VALID"
+        echo "Repository exists: $REPO_EXISTS"
+
+        # Overall validation passes if:
+        # - Name is valid
+        # - Teams are valid (or no teams specified)
+        # - Repository does NOT exist
+        if [[ "$NAME_VALID" == "true" && "$TEAMS_VALID" == "true" && "$REPO_EXISTS" != "true" ]]; then
+          echo "validation-passed=true" >> $GITHUB_OUTPUT
+          echo "✅ Overall validation: PASSED"
+        else
+          echo "validation-passed=false" >> $GITHUB_OUTPUT
+          echo "❌ Overall validation: FAILED"
+        fi
+
+        # Build markdown summary table
+        {
+          echo "validation-summary<<MDEOF"
+          echo "| Check | Status | Details |"
+          echo "|-------|--------|---------|"
+
+          if [[ "$NAME_VALID" == "true" ]]; then
+            echo "| Repository Name | ✅ Valid | ${{ inputs.repository-name }} |"
+          else
+            echo "| Repository Name | ❌ Invalid | ${{ steps.validate-name.outputs.name-error }} |"
+          fi
+
+          if [[ "$TEAMS_VALID" == "true" ]]; then
+            echo "| Team Existence | ✅ Valid | ${{ steps.validate-teams.outputs.teams-display }} |"
+          else
+            echo "| Team Existence | ❌ Invalid | ${{ steps.validate-teams.outputs.teams-error }} |"
+          fi
+
+          if [[ "$REPO_EXISTS" != "true" ]]; then
+            echo "| Repository Availability | ✅ Available | Repository name is available |"
+          else
+            echo "| Repository Availability | ❌ Already Exists | ${{ steps.check-repo.outputs.repository-error }} |"
+          fi
+
+          echo "MDEOF"
+        } >> $GITHUB_OUTPUT
+
+        echo "::endgroup::"

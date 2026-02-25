@@ -1,0 +1,259 @@
+# Generate and append a YAML repository entry to a config file using yq and bash echo.
+# This action loads organizational defaults from a defaults file and merges them with
+# repository-specific configuration to generate a complete YAML entry.
+#
+# CRITICAL: This action uses EXACT bash echo string concatenation approach from repo-request.yml
+# to ensure byte-for-byte identical YAML output and prevent Terraform drift.
+#
+# Key features:
+# - Auto-generates description from repository name (kebab-case → Title Case)
+# - Loads defaults from defaults.yaml (visibility, features, security, topics)
+# - Merges default topics with tech-stack-based topic
+# - Supports team access configuration in YAML format
+# - Uses bash echo blocks (NOT yq eval) for YAML generation
+#
+# Usage Pattern:
+#   - uses: paloitmbb/mss-devops-workflow/actions/github-update-yamlconfig@main
+#     with:
+#       config-file: 'data/repositories.yaml'
+#       defaults-file: 'data/defaults.yaml'
+#       repository-name: 'my-new-repo'
+#       tech-stack: 'Python'
+#       teams: '["platform-team","devops-team"]'
+#
+# Security: No secrets required - manipulates YAML configuration files only
+
+name: 'GitHub - Update YAML Config'
+description: 'Generate and append a YAML repository entry to a config file using yq, applying organizational defaults from a defaults file'
+
+inputs:
+  config-file:
+    description: 'Path to YAML file to update (e.g., data/repositories.yaml)'
+    required: true
+
+  defaults-file:
+    description: 'Path to defaults YAML file (e.g., data/defaults.yaml)'
+    required: true
+
+  repository-name:
+    description: 'Repository name'
+    required: true
+
+  tech-stack:
+    description: 'Technology stack for the repository'
+    required: true
+
+  default-branch:
+    description: 'Default branch name'
+    required: false
+    default: 'main'
+
+  teams:
+    description: 'JSON array of team slugs from validation (e.g., ["team-a","team-b"])'
+    required: false
+    default: '[]'
+
+  team-permission:
+    description: 'Permission level for teams (push, pull, admin, maintain, triage)'
+    required: false
+    default: 'push'
+
+  additional-topics:
+    description: 'Comma-separated extra topics to add beyond defaults and tech stack'
+    required: false
+    default: ''
+
+  yq-version:
+    description: 'yq version for version check (not used for download URL)'
+    required: false
+    default: 'v4.44.1'
+
+outputs:
+  yaml-updated:
+    description: 'Whether YAML was successfully updated (true/false)'
+    value: ${{ steps.validate-yaml.outputs.yaml-updated }}
+
+  entry-preview:
+    description: 'Preview of the YAML entry that was appended'
+    value: ${{ steps.generate-entry.outputs.entry-preview }}
+
+  repository-description:
+    description: 'Auto-generated repository description'
+    value: ${{ steps.generate-entry.outputs.repository-description }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install yq if not available
+      id: install-yq
+      shell: bash
+      run: |
+        echo "::group::Install yq"
+
+        # Check if yq is already available
+        if command -v yq &> /dev/null; then
+          echo "✅ yq is already installed"
+          yq --version
+        else
+          echo "📦 Installing yq..."
+          # EXACT match to repo-request.yml line 365
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          echo "✅ yq installed successfully"
+          yq --version
+        fi
+
+        echo "::endgroup::"
+
+    - name: Generate YAML entry
+      id: generate-entry
+      shell: bash
+      run: |
+        echo "::group::Generate YAML Entry"
+
+        CONFIG_FILE="${{ inputs.config-file }}"
+        DEFAULTS_FILE="${{ inputs.defaults-file }}"
+        REPO_NAME="${{ inputs.repository-name }}"
+        TECH_STACK="${{ inputs.tech-stack }}"
+        DEFAULT_BRANCH="${{ inputs.default-branch }}"
+        TEAMS_JSON='${{ inputs.teams }}'
+        TEAM_PERMISSION="${{ inputs.team-permission }}"
+        ADDITIONAL_TOPICS="${{ inputs.additional-topics }}"
+
+        # EXACT REPLICATION OF repo-request.yml lines 370-431
+        # Load defaults from defaults.yaml
+        DEFAULTS=$(yq eval '.repository_defaults' "$DEFAULTS_FILE" -o json)
+
+        # Extract default values
+        VISIBILITY=$(echo "$DEFAULTS" | jq -r '.visibility')
+        HAS_ISSUES=$(echo "$DEFAULTS" | jq -r '.features.has_issues')
+        HAS_PROJECTS=$(echo "$DEFAULTS" | jq -r '.features.has_projects')
+        HAS_WIKI=$(echo "$DEFAULTS" | jq -r '.features.has_wiki')
+
+        # Security settings
+        VULN_ALERTS=$(echo "$DEFAULTS" | jq -r '.security.enable_vulnerability_alerts')
+        ADV_SECURITY=$(echo "$DEFAULTS" | jq -r '.security.enable_advanced_security')
+        SECRET_SCAN=$(echo "$DEFAULTS" | jq -r '.security.enable_secret_scanning')
+        SECRET_PUSH=$(echo "$DEFAULTS" | jq -r '.security.enable_secret_scanning_push_protection')
+        DEPENDABOT_ALERTS=$(echo "$DEFAULTS" | jq -r '.security.enable_dependabot_alerts')
+        DEPENDABOT_UPDATES=$(echo "$DEFAULTS" | jq -r '.security.enable_dependabot_security_updates')
+
+        # Get topics from default and add tech stack
+        DEFAULT_TOPICS=$(echo "$DEFAULTS" | jq -r '.topics | join(", ")')
+        TECH_TOPIC=$(echo "$TECH_STACK" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+
+        # Build topics array (defaults + tech stack)
+        TOPICS_ARRAY="[]"
+        if [ -n "$DEFAULT_TOPICS" ]; then
+          # Start with default topics
+          IFS=',' read -ra TOPIC_ITEMS <<< "$DEFAULT_TOPICS"
+          TOPICS_ARRAY="["
+          for topic in "${TOPIC_ITEMS[@]}"; do
+            topic=$(echo "$topic" | xargs)  # trim whitespace
+            TOPICS_ARRAY="${TOPICS_ARRAY}\"${topic}\", "
+          done
+          # Add tech stack
+          TOPICS_ARRAY="${TOPICS_ARRAY}\"${TECH_TOPIC}\"]"
+        else
+          TOPICS_ARRAY="[\"${TECH_TOPIC}\"]"
+        fi
+
+        # Add additional topics if provided
+        if [ -n "$ADDITIONAL_TOPICS" ]; then
+          IFS=',' read -ra ADD_TOPICS <<< "$ADDITIONAL_TOPICS"
+          for topic in "${ADD_TOPICS[@]}"; do
+            topic=$(echo "$topic" | xargs | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+            if [ -n "$topic" ]; then
+              # Insert before closing bracket
+              TOPICS_ARRAY="${TOPICS_ARRAY%]}, \"${topic}\"]"
+            fi
+          done
+        fi
+
+        # Generate description (EXACT match to repo-request.yml line 413)
+        DESCRIPTION=$(echo "$REPO_NAME" | sed 's/-/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2));}1')
+        DESCRIPTION="${DESCRIPTION} using ${TECH_STACK}"
+
+        echo "Repository: $REPO_NAME"
+        echo "Description: $DESCRIPTION"
+        echo "Tech Stack: $TECH_STACK"
+        echo "Topics: $TOPICS_ARRAY"
+        echo "Teams: $TEAMS_JSON"
+
+        # Build teams array in YAML format (EXACT match to repo-request.yml lines 419-431)
+        TEAMS_YAML=""
+        if [ "$TEAMS_JSON" != "null" ] && [ "$TEAMS_JSON" != "[]" ]; then
+          # Parse JSON array and build YAML
+          TEAM_COUNT=$(echo "$TEAMS_JSON" | jq -r 'length')
+          if [ "$TEAM_COUNT" -gt 0 ]; then
+            for i in $(seq 0 $((TEAM_COUNT - 1))); do
+              team=$(echo "$TEAMS_JSON" | jq -r ".[$i]")
+              if [ -n "$team" ] && [ "$team" != "null" ] && [ "$team" != "_No response_" ]; then
+                TEAMS_YAML="${TEAMS_YAML}  - team: ${team}\n"
+                TEAMS_YAML="${TEAMS_YAML}    permission: ${TEAM_PERMISSION}\n"
+              fi
+            done
+          fi
+        fi
+
+        # EXACT REPLICATION OF repo-request.yml lines 433-455
+        # Append to repositories.yaml with proper indentation (2 spaces for array items)
+        {
+          echo ""
+          echo "  - name: ${REPO_NAME}"
+          echo "    description: \"${DESCRIPTION}\""
+          echo "    visibility: ${VISIBILITY}"
+          echo "    features:"
+          echo "      has_issues: ${HAS_ISSUES}"
+          echo "      has_projects: ${HAS_PROJECTS}"
+          echo "      has_wiki: ${HAS_WIKI}"
+          echo "    default_branch: ${DEFAULT_BRANCH}"
+          echo "    topics: ${TOPICS_ARRAY}"
+          echo "    security:"
+          echo "      enable_vulnerability_alerts: ${VULN_ALERTS}"
+          echo "      enable_advanced_security: ${ADV_SECURITY}"
+          echo "      enable_secret_scanning: ${SECRET_SCAN}"
+          echo "      enable_secret_scanning_push_protection: ${SECRET_PUSH}"
+          echo "      enable_dependabot_alerts: ${DEPENDABOT_ALERTS}"
+          echo "      enable_dependabot_security_updates: ${DEPENDABOT_UPDATES}"
+          # Add teams if any were specified
+          if [ -n "$TEAMS_YAML" ]; then
+            echo "    teams:"
+            echo -e "$TEAMS_YAML" | sed 's/^/    /'
+          fi
+        } >> "$CONFIG_FILE"
+
+        echo "✅ Successfully updated $CONFIG_FILE"
+
+        # Capture entry preview for PR body (last entry added)
+        ENTRY_PREVIEW=$(tail -n 20 "$CONFIG_FILE")
+
+        # Set outputs
+        echo "repository-description=$DESCRIPTION" >> $GITHUB_OUTPUT
+        {
+          echo "entry-preview<<PREVIEW_EOF"
+          echo "$ENTRY_PREVIEW"
+          echo "PREVIEW_EOF"
+        } >> $GITHUB_OUTPUT
+
+        echo "::endgroup::"
+
+    - name: Validate YAML syntax
+      id: validate-yaml
+      shell: bash
+      run: |
+        echo "::group::Validate YAML"
+
+        CONFIG_FILE="${{ inputs.config-file }}"
+
+        # Validate resulting YAML with yq
+        if yq eval '.' "$CONFIG_FILE" > /dev/null 2>&1; then
+          echo "✅ YAML syntax is valid"
+          echo "yaml-updated=true" >> $GITHUB_OUTPUT
+        else
+          echo "❌ YAML syntax validation failed"
+          echo "yaml-updated=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+
+        echo "::endgroup::"
