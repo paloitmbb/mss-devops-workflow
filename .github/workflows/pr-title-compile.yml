@@ -3,17 +3,20 @@ name: CI - Compile Agentic Workflows
 # ============================================================================
 # Agentic Workflow Compilation
 #
-# Recompiles agentic workflow (.md) sources into their corresponding .lock.yml
-# files whenever the source is changed via a pull request.
+# Recompiles any agentic workflow (.md) source into its corresponding
+# .lock.yml file whenever changes are merged to the main branch.
 #
-# Uses the `gh aw compile` CLI (gh-aw extension) to regenerate the lock file
-# and commits the result back to the PR branch.
+# Uses the `gh aw compile` CLI (gh-aw extension) to regenerate lock files
+# and commits the results back to main.
 #
-# Trigger: any change to a .md workflow source in .github/workflows/
+# Trigger: push to main when any .md workflow source in .github/workflows/
+#          is added or updated (i.e. on PR merge).
 # ============================================================================
 
 on:
-  pull_request:
+  push:
+    branches:
+      - main
     paths:
       - '.github/workflows/*.md'
 
@@ -27,10 +30,10 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Checkout PR branch
+      - name: Checkout main
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.head_ref }}
+          fetch-depth: 2
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install gh-aw CLI extension
@@ -40,9 +43,8 @@ jobs:
 
       - name: Compile changed agentic workflow(s)
         run: |
-          # Detect which .md workflow files changed in this PR
-          CHANGED_MD=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- '.github/workflows/*.md' 2>/dev/null || \
-                       git diff --name-only HEAD~1 -- '.github/workflows/*.md')
+          # Detect which .md workflow files were changed in the merge commit
+          CHANGED_MD=$(git diff --name-only HEAD~1..HEAD -- '.github/workflows/*.md')
 
           if [ -z "$CHANGED_MD" ]; then
             echo "No agentic workflow .md files changed."
