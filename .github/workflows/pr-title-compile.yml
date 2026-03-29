@@ -1,32 +1,28 @@
-name: CI - Compile PR Title Validator
+name: CI - Compile Agentic Workflows
 
 # ============================================================================
 # Agentic Workflow Compilation
 #
-# Rebuilds the `github-pr-validate-title` Node.js action whenever its source
-# code or dependencies are changed via a pull request.
+# Recompiles agentic workflow (.md) sources into their corresponding .lock.yml
+# files whenever the source is changed via a pull request.
 #
-# What it does:
-#   1. Installs npm dependencies (regenerates package-lock.json if needed)
-#   2. Compiles src/index.js into dist/index.js via @vercel/ncc
-#   3. Commits the updated dist/ and package-lock.json back to the PR branch
+# Uses the `gh aw compile` CLI (gh-aw extension) to regenerate the lock file
+# and commits the result back to the PR branch.
 #
-# This ensures the compiled dist/ artefact and lock file always stay in sync
-# with the source, so consumers never run stale code.
+# Trigger: any change to a .md workflow source in .github/workflows/
 # ============================================================================
 
 on:
   pull_request:
     paths:
-      - 'actions/github-pr-validate-title/src/**'
-      - 'actions/github-pr-validate-title/package.json'
+      - '.github/workflows/*.md'
 
 permissions:
   contents: write
 
 jobs:
   compile:
-    name: 🔨 Compile & Lock — PR Title Validator
+    name: 🔨 Compile Agentic Workflow Lock Files
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -37,27 +33,39 @@ jobs:
           ref: ${{ github.head_ref }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Node.js
-        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: 'actions/github-pr-validate-title/package-lock.json'
+      - name: Install gh-aw CLI extension
+        run: gh extension install github/gh-aw
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install dependencies
-        working-directory: actions/github-pr-validate-title
-        run: npm install
+      - name: Compile changed agentic workflow(s)
+        run: |
+          # Detect which .md workflow files changed in this PR
+          CHANGED_MD=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- '.github/workflows/*.md' 2>/dev/null || \
+                       git diff --name-only HEAD~1 -- '.github/workflows/*.md')
 
-      - name: Build (compile to dist/)
-        working-directory: actions/github-pr-validate-title
-        run: npm run build
+          if [ -z "$CHANGED_MD" ]; then
+            echo "No agentic workflow .md files changed."
+            exit 0
+          fi
 
-      - name: Commit updated dist/ and lock file
-        working-directory: actions/github-pr-validate-title
+          echo "Changed agentic workflow files:"
+          echo "$CHANGED_MD"
+
+          for md_file in $CHANGED_MD; do
+            # Derive the workflow name (filename without path and .md extension)
+            workflow_name=$(basename "$md_file" .md)
+            echo "Compiling: $workflow_name"
+            gh aw compile "$workflow_name"
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Commit updated lock file(s)
         run: |
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git add dist/ package-lock.json
-          git diff --staged --quiet && echo "No changes to commit." || \
-            git commit -m "ci: rebuild dist and lock file for pr-validate-title action [skip ci]"
+          git add .github/workflows/*.lock.yml
+          git diff --staged --quiet && echo "No lock file changes to commit." || \
+            git commit -m "ci: recompile agentic workflow lock file(s) [skip ci]"
           git push
