@@ -1,0 +1,63 @@
+name: CI - Compile PR Title Validator
+
+# ============================================================================
+# Agentic Workflow Compilation
+#
+# Rebuilds the `github-pr-validate-title` Node.js action whenever its source
+# code or dependencies are changed via a pull request.
+#
+# What it does:
+#   1. Installs npm dependencies (regenerates package-lock.json if needed)
+#   2. Compiles src/index.js into dist/index.js via @vercel/ncc
+#   3. Commits the updated dist/ and package-lock.json back to the PR branch
+#
+# This ensures the compiled dist/ artefact and lock file always stay in sync
+# with the source, so consumers never run stale code.
+# ============================================================================
+
+on:
+  pull_request:
+    paths:
+      - 'actions/github-pr-validate-title/src/**'
+      - 'actions/github-pr-validate-title/package.json'
+
+permissions:
+  contents: write
+
+jobs:
+  compile:
+    name: 🔨 Compile & Lock — PR Title Validator
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: 'actions/github-pr-validate-title/package-lock.json'
+
+      - name: Install dependencies
+        working-directory: actions/github-pr-validate-title
+        run: npm install
+
+      - name: Build (compile to dist/)
+        working-directory: actions/github-pr-validate-title
+        run: npm run build
+
+      - name: Commit updated dist/ and lock file
+        working-directory: actions/github-pr-validate-title
+        run: |
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git add dist/ package-lock.json
+          git diff --staged --quiet && echo "No changes to commit." || \
+            git commit -m "ci: rebuild dist and lock file for pr-validate-title action [skip ci]"
+          git push

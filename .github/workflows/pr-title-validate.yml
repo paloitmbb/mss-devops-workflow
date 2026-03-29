@@ -1,0 +1,39 @@
+name: PR - Validate Title (Conventional Commits)
+
+# ============================================================================
+# PR Title Agentic Validation Workflow
+#
+# Enforces the Conventional Commits standard on every pull request title.
+# See: https://www.conventionalcommits.org/
+#
+# Triggers on PR creation (opened), updates (synchronize/edited), and reopens.
+#
+# Valid format: <type>[optional scope][optional !]: <description>
+# Valid types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert
+#
+# Examples of valid titles:
+#   feat: add OAuth2 login
+#   fix(auth): resolve token expiry race condition
+#   chore!: drop Python 3.8 support
+#   feat(api)!: breaking change to endpoint schema
+# ============================================================================
+
+on:
+  pull_request:
+    types: [opened, synchronize, edited, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  validate-title:
+    name: 🔍 Validate PR Title (Conventional Commits)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate PR title
+        uses: paloitmbb/mss-devops-workflow/actions/github-pr-validate-title@main
