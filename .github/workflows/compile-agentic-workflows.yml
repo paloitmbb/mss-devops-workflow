@@ -1,0 +1,73 @@
+name: CI - Compile Agentic Workflows
+
+# ============================================================================
+# Agentic Workflow Compilation
+#
+# Recompiles any agentic workflow (.md) source into its corresponding
+# .lock.yml file whenever changes are merged to the main branch.
+#
+# Uses the `gh aw compile` CLI (gh-aw extension) to regenerate lock files
+# and commits the results back to main.
+#
+# Trigger: push to main when any .md workflow source in .github/workflows/
+#          is added or updated (i.e. on PR merge).
+# ============================================================================
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/*.md'
+
+permissions:
+  contents: write
+
+jobs:
+  compile:
+    name: 🔨 Compile Agentic Workflow Lock Files
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 2
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install gh-aw CLI extension
+        run: gh extension install github/gh-aw
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compile changed agentic workflow(s)
+        run: |
+          # Detect which .md workflow files were changed in the merge commit
+          CHANGED_MD=$(git diff --name-only HEAD~1..HEAD -- '.github/workflows/*.md')
+
+          if [ -z "$CHANGED_MD" ]; then
+            echo "No agentic workflow .md files changed."
+            exit 0
+          fi
+
+          echo "Changed agentic workflow files:"
+          echo "$CHANGED_MD"
+
+          for md_file in $CHANGED_MD; do
+            # Derive the workflow name (filename without path and .md extension)
+            workflow_name=$(basename "$md_file" .md)
+            echo "Compiling: $workflow_name"
+            gh aw compile "$workflow_name"
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Commit updated lock file(s)
+        run: |
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/*.lock.yml
+          git diff --staged --quiet && echo "No lock file changes to commit." || \
+            git commit -m "ci: recompile agentic workflow lock file(s) [skip ci]"
+          git push
