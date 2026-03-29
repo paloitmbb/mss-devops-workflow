@@ -3,25 +3,22 @@ name: CI - Compile Agentic Workflows
 # ============================================================================
 # Agentic Workflow Compilation
 #
-# Recompiles agentic workflow (.md) sources into their corresponding
-# .lock.yml files.
+# Recompiles any agentic workflow (.md) source into its corresponding
+# .lock.yml file whenever changes are merged to the main branch.
 #
 # Uses the `gh aw compile` CLI (gh-aw extension) to regenerate lock files
-# and commits the results back to the caller's branch.
+# and commits the results back to main.
 #
-# Trigger: workflow_call — called by consumer workflows passing the names
-#          of the agentic workflow(s) to (re)compile.
+# Trigger: push to main when any .md workflow source in .github/workflows/
+#          is added or updated (i.e. on PR merge).
 # ============================================================================
 
 on:
-  workflow_call:
-    inputs:
-      workflow-names:
-        description: >
-          Space-separated list of agentic workflow names (without .md extension)
-          to compile. Example: 'pr-title-validate my-other-workflow'
-        required: true
-        type: string
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/*.md'
 
 permissions:
   contents: write
@@ -33,9 +30,10 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Checkout
+      - name: Checkout main
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          fetch-depth: 2
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install gh-aw CLI extension
@@ -43,9 +41,22 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compile agentic workflow(s)
+      - name: Compile changed agentic workflow(s)
         run: |
-          for workflow_name in ${{ inputs.workflow-names }}; do
+          # Detect which .md workflow files were changed in the merge commit
+          CHANGED_MD=$(git diff --name-only HEAD~1..HEAD -- '.github/workflows/*.md')
+
+          if [ -z "$CHANGED_MD" ]; then
+            echo "No agentic workflow .md files changed."
+            exit 0
+          fi
+
+          echo "Changed agentic workflow files:"
+          echo "$CHANGED_MD"
+
+          for md_file in $CHANGED_MD; do
+            # Derive the workflow name (filename without path and .md extension)
+            workflow_name=$(basename "$md_file" .md)
             echo "Compiling: $workflow_name"
             gh aw compile "$workflow_name"
           done

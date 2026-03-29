@@ -3,8 +3,7 @@ name: "PR Title Validator"
 description: "Validates that pull request titles follow the Conventional Commits standard and comments with guidance if they do not"
 
 on:
-  pull_request:
-    types: [opened, edited, synchronize, reopened]
+  workflow_call:
 
 permissions:
   contents: read
