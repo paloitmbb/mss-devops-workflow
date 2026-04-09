@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
 
 tools:
   github:
@@ -16,7 +15,7 @@ tools:
 safe-outputs:
   add-comment:
     max: 1
-    target: pull_request
+    target: triggering
 ---
 
 # PR Title Validator
