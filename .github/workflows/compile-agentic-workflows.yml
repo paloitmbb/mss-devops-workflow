@@ -45,18 +45,24 @@ jobs:
 
       - name: Compile changed agentic workflow(s)
         run: |
-          # Detect which .md workflow files were changed in the merge commit
-          CHANGED_MD=$(git diff --name-only HEAD~1..HEAD -- '.github/workflows/*.md')
+          # On workflow_dispatch: compile all .md files (handles missing lock files).
+          # On push: compile only the .md files changed in the merge commit.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TARGET_MD=$(find .github/workflows -maxdepth 1 -name '*.md' | sort)
+            echo "Manual dispatch — compiling all agentic workflow files:"
+          else
+            TARGET_MD=$(git diff --name-only HEAD~1..HEAD -- '.github/workflows/*.md')
+            echo "Push trigger — compiling changed agentic workflow files:"
+          fi
 
-          if [ -z "$CHANGED_MD" ]; then
-            echo "No agentic workflow .md files changed."
+          if [ -z "$TARGET_MD" ]; then
+            echo "No agentic workflow .md files to compile."
             exit 0
           fi
 
-          echo "Changed agentic workflow files:"
-          echo "$CHANGED_MD"
+          echo "$TARGET_MD"
 
-          for md_file in $CHANGED_MD; do
+          for md_file in $TARGET_MD; do
             # Derive the workflow name (filename without path and .md extension)
             workflow_name=$(basename "$md_file" .md)
             echo "Compiling: $workflow_name"
@@ -69,7 +75,8 @@ jobs:
         run: |
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git add .github/workflows/*.lock.yml
+          # Safely stage any lock files that exist (glob may match nothing if all were deleted)
+          find .github/workflows -maxdepth 1 -name '*.lock.yml' | xargs -r git add
           if git diff --staged --quiet; then
             echo "No lock file changes to commit."
             exit 0
