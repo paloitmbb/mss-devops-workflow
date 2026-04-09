@@ -95,6 +95,15 @@ jobs:
             --head "$BRANCH" \
             --title "ci: recompile agentic workflow lock file(s)" \
             --body "Automated PR to update agentic workflow lock file(s) after source changes merged to main." \
-          || echo "PR already open for branch $BRANCH — force-push updated it."
+          && echo "PR created successfully." \
+          || {
+            # PR may already exist — check and skip if so, otherwise fail
+            if gh pr view "$BRANCH" --json number -q .number 2>/dev/null; then
+              echo "PR already open for branch $BRANCH — force-push updated it."
+            else
+              echo "ERROR: Failed to create PR."
+              exit 1
+            fi
+          }
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
