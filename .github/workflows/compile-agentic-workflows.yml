@@ -7,7 +7,7 @@ name: CI - Compile Agentic Workflows
 # .lock.yml file whenever changes are merged to the main branch.
 #
 # Uses the `gh aw compile` CLI (gh-aw extension) to regenerate lock files
-# and commits the results back to main.
+# and opens a PR against main with the updated lock file(s).
 #
 # Trigger: push to main when any .md workflow source in .github/workflows/
 #          is added or updated (i.e. on PR merge).
@@ -22,6 +22,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   compile:
@@ -63,11 +64,26 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Commit updated lock file(s)
+      - name: Open PR with updated lock file(s)
         run: |
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git add .github/workflows/*.lock.yml
-          git diff --staged --quiet && echo "No lock file changes to commit." || \
-            git commit -m "ci: recompile agentic workflow lock file(s) [skip ci]"
-          git push
+          if git diff --staged --quiet; then
+            echo "No lock file changes to commit."
+            exit 0
+          fi
+
+          BRANCH="ci/recompile-agentic-locks"
+          git checkout -b "$BRANCH"
+          git commit -m "ci: recompile agentic workflow lock file(s) [skip ci]"
+          git push --force origin "$BRANCH"
+
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "ci: recompile agentic workflow lock file(s)" \
+            --body "Automated PR to update agentic workflow lock file(s) after source changes merged to main." \
+          || echo "PR already open for branch $BRANCH — force-push updated it."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
