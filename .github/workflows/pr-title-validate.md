@@ -8,8 +8,6 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  issues: write
-  discussions: write
 
 tools:
   github:
