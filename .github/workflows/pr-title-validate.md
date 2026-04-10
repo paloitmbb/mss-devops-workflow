@@ -10,7 +10,6 @@ permissions:
   pull-requests: write
   issues: write
   discussions: write
-  copilot-requests: write
 
 tools:
   github:
@@ -20,9 +19,6 @@ safe-outputs:
   add-comment:
     max: 1
     target: triggering
-
-features:
-  copilot-requests: true
 ---
 
 # PR Title Validator
