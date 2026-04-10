@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 tools:
   github:
@@ -57,8 +58,8 @@ If the title is **valid**, do not comment — silently pass.
 
 If the title is **invalid**, add exactly one comment to the PR that:
 
-1. States clearly that the PR title does not follow the Conventional Commits standard
-2. Shows the exact title that was checked
-3. Explains the expected format with the valid types listed
-4. Provides two or three concrete examples of valid titles
-5. Asks the author to update the PR title before merging
+1.  States clearly that the PR title does not follow the Conventional Commits standard
+2.  Shows the exact title that was checked
+3.  Explains the expected format with the valid types listed
+4.  Provides two or three concrete examples of valid titles
+5.  Asks the author to update the PR title before merging
