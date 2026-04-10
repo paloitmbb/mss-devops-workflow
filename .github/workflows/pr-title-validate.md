@@ -7,6 +7,10 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
+  issues: write
+  discussions: write
+  copilot-requests: write
 
 tools:
   github:

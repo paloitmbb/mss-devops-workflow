@@ -27,6 +27,7 @@ permissions:
   pull-requests: write
   issues: write
   discussions: write
+  copilot-requests: write
 
 jobs:
   pr-title-validate:
