@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+engine:
+  id: copilot
+  env:
+    GITHUB_COPILOT_BASE_URL: "https://api.githubcopilot.com"
+
 tools:
   github:
     toolsets: [pull_requests]
