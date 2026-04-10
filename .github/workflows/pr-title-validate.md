@@ -4,14 +4,18 @@ description: "Validates that pull request titles follow the Conventional Commits
 
 on:
   workflow_call:
+  pull_request:
+    branches:
+      - main
+      - develop
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
 
 permissions:
   contents: read
-
-engine:
-  id: copilot
-  env:
-    GITHUB_COPILOT_BASE_URL: "https://api.githubcopilot.com"
 
 tools:
   github:
