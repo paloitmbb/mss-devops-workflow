@@ -1,0 +1,35 @@
+name: PR Title Validate
+
+# ============================================================================
+# PR Title Validation Caller Workflow
+#
+# Triggers the agentic PR Title Validator (pr-title-validate.lock.yml) on
+# every pull_request event so that PR titles are checked against the
+# Conventional Commits standard.
+#
+# The heavy lifting is done by the compiled lock file; this workflow simply
+# acts as the event-driven entry point.
+# ============================================================================
+
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  discussions: write
+
+jobs:
+  pr-title-validate:
+    name: Validate PR Title
+    uses: ./.github/workflows/pr-title-validate.lock.yml
+    secrets: inherit

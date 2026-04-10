@@ -16,6 +16,9 @@ safe-outputs:
   add-comment:
     max: 1
     target: triggering
+
+features:
+  copilot-requests: true
 ---
 
 # PR Title Validator
@@ -29,6 +32,7 @@ Validate the title against the Conventional Commits specification (https://www.c
 **Valid types** (lowercase only): `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`
 
 **Rules**:
+
 - The type must be one of the valid types listed above and written in lowercase
 - An optional scope may follow the type enclosed in parentheses, e.g. `(auth)`, and must not contain spaces
 - An optional `!` immediately after the type or scope signals a breaking change
@@ -36,6 +40,7 @@ Validate the title against the Conventional Commits specification (https://www.c
 - The description must be non-empty
 
 **Examples of valid titles**:
+
 - `feat: add OAuth2 login`
 - `fix(auth): resolve token expiry race condition`
 - `chore!: drop Python 3.8 support`
@@ -44,6 +49,7 @@ Validate the title against the Conventional Commits specification (https://www.c
 - `ci: pin GitHub Actions to SHA`
 
 **Examples of invalid titles**:
+
 - `Add new feature` (missing type prefix)
 - `WIP: something` (WIP is not a valid type)
 - `feat:no space after colon`
@@ -53,6 +59,7 @@ Validate the title against the Conventional Commits specification (https://www.c
 If the title is **valid**, do not comment — silently pass.
 
 If the title is **invalid**, add exactly one comment to the PR that:
+
 1. States clearly that the PR title does not follow the Conventional Commits standard
 2. Shows the exact title that was checked
 3. Explains the expected format with the valid types listed
