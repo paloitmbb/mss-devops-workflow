@@ -21,9 +21,11 @@ on:
       - '.github/workflows/*.md'
   workflow_dispatch:
 
+# Restrict the built-in GITHUB_TOKEN to read-only; all write operations
+# are performed via the short-lived GitHub App installation token generated
+# in the first step.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   compile:
@@ -32,17 +34,24 @@ jobs:
     timeout-minutes: 10
 
     steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@3ff1caaa28b64c9cc276b8f5d7b885104e4ac83d # v1.12.0
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
       - name: Checkout main
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 2
-          token: ${{ secrets.GH_PAT }}
+          token: ${{ steps.app-token.outputs.token }}
           persist-credentials: false
 
       - name: Install gh-aw CLI extension
         run: gh extension install github/gh-aw
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
       - name: Compile changed agentic workflow(s)
         run: |
@@ -70,14 +79,14 @@ jobs:
             gh aw compile "$workflow_name"
           done
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
       - name: Open PR with updated lock file(s)
         run: |
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          # Authenticate git push using the PAT embedded in the remote URL
-          git remote set-url origin https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }}
+          # Authenticate git push using the short-lived GitHub App installation token
+          git remote set-url origin https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/${{ github.repository }}
           # Safely stage any lock files that exist (glob may match nothing if all were deleted)
           find .github/workflows -maxdepth 1 -name '*.lock.yml' | xargs -r git add
           if git diff --staged --quiet; then
@@ -106,4 +115,4 @@ jobs:
             fi
           }
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
