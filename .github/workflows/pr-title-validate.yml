@@ -25,6 +25,8 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  issues: write
+  discussions: write
 
 jobs:
   pr-title-validate:
